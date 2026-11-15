@@ -20,6 +20,7 @@ import {
 } from './db/index.ts';
 import { ensureSeedDatabase } from './db/seed.ts';
 import { queryCommentRecommendations, queryForYou, queryTrending, queryUnlockedSeries } from './db/recommend.ts';
+import { registerAdminRoutes, type AdminRoutesOptions } from './admin.ts';
 import { startBackgroundSyncScheduler } from './lib/scheduler.ts';
 import { buildPageMeta, renderIndexHtml } from './seo.ts';
 
@@ -73,6 +74,7 @@ function parseSlugList(raw: string | undefined, max: number): string[] {
 
 export interface AppOptions {
   rateLimitPerMin?: number;
+  admin?: AdminRoutesOptions;
 }
 
 export function createApp(dbPath?: string, opts: AppOptions = {}) {
@@ -131,7 +133,7 @@ export function createApp(dbPath?: string, opts: AppOptions = {}) {
     await next();
     if (c.req.method === 'GET' && c.res.status === 200) {
       const cacheValue =
-        c.req.path === '/api/geo'
+        c.req.path === '/api/geo' || c.req.path.startsWith('/api/admin/')
           ? 'private, no-store'
           : 'public, max-age=60, stale-while-revalidate=300';
       c.res.headers.set('Cache-Control', cacheValue);
@@ -240,6 +242,8 @@ export function createApp(dbPath?: string, opts: AppOptions = {}) {
     return c.html(html, meta.noindex && url.pathname.startsWith('/watch/') ? 404 : 200);
   };
 
+  registerAdminRoutes(app, db, opts.admin);
+
   // HTML routes are rendered server-side so crawlers see per-page titles/meta without running JS.
   app.get('/', renderShell);
   app.get('/index.html', renderShell);
@@ -260,11 +264,12 @@ if (isDirect) {
     await ensureSeedDatabase(getDbPath());
 
     const port = parseInt(process.env.PORT || '3000', 10) || 3000;
-    const app = createApp();
+    const db = openDatabase();
+    const scheduler = startBackgroundSyncScheduler(db);
+    const app = createApp(undefined, { admin: { jobs: scheduler } });
     const server = serve({ fetch: app.fetch, port }, () => {
       console.log(`AnimaxTube server listening on http://localhost:${port}`);
     });
-    const scheduler = startBackgroundSyncScheduler();
 
     let shuttingDown = false;
     const shutdown = (signal: string) => {

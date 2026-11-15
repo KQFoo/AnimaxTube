@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   ensureUniqueSlug,
   openDatabase,
@@ -7,6 +9,7 @@ import {
   refreshSeriesStats,
 } from '../db/index.ts';
 import type { ChannelRow, SeriesRow } from '../db/schema.ts';
+import { reconcileMissingSeedChannels } from '../discovery/add-channel.ts';
 import {
   fetchAllPlaylists,
   fetchPlaylistItems,
@@ -68,16 +71,48 @@ function getOrCreateSeries(
   return Number(res.lastInsertRowid);
 }
 
-export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: ChannelRow) {
+export interface SyncChannelOptions {
+  incremental?: boolean;
+  skipVideoDetails?: boolean;
+  skipLockedPool?: boolean;
+}
+
+export async function syncChannel(
+  db: ReturnType<typeof openDatabase>,
+  channel: ChannelRow,
+  opts: SyncChannelOptions = {}
+) {
+  const incremental = opts.incremental ?? process.argv.includes('--incremental');
+  const skipVideoDetails = opts.skipVideoDetails ?? process.argv.includes('--skip-video-details');
+  const skipLockedPool = opts.skipLockedPool ?? process.argv.includes('--skip-locked-pool');
+
   const channelLangs = parseJsonArray(channel.sub_languages);
   const defaultLang = (channelLangs[0] as SubLanguage) || 'en';
   const playlists = await fetchAllPlaylists(channel.youtube_channel_id, 25);
 
-  console.log(`\nSyncing ${channel.name} (${playlists.length} total playlists)...`);
+  const existingPlaylistMap = new Map<string, { episodeCount: number; playlistItemCount: number | null }>();
+  if (incremental) {
+    const existingRows = db
+      .prepare('SELECT playlist_id, episode_count, playlist_item_count FROM channel_series WHERE channel_id = ?')
+      .all(channel.id) as unknown as Array<{
+      playlist_id: string;
+      episode_count: number;
+      playlist_item_count: number | null;
+    }>;
+    for (const r of existingRows) {
+      existingPlaylistMap.set(r.playlist_id, {
+        episodeCount: r.episode_count,
+        playlistItemCount: r.playlist_item_count,
+      });
+    }
+  }
+
+  console.log(`\nSyncing ${channel.name} (${playlists.length} total playlists${incremental ? ', incremental' : ''})...`);
   const seenVideoIds = new Set<string>();
   const newVideoIdsForDetails: string[] = [];
   const touchedSeriesIds = new Set<number>();
   let syncedPlaylists = 0;
+  let skippedUnchangedPlaylists = 0;
 
   const recordLocked = db.prepare(
     `INSERT INTO locked_watch_pool (youtube_video_id, channel_id, playlist_id, playlist_title, title, sub_language, detected_reason)
@@ -91,7 +126,7 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
   for (const pl of playlists) {
     if (pl.itemCount <= 0 || isNonSeriesPlaylist(pl.title) || isMembersOnlyPlaylist(pl.title)) {
       // If explicitly a members-only/ULTRA playlist, record items in locked_watch_pool for unlock tracking
-      if (pl.itemCount > 0 && isMembersOnlyPlaylist(pl.title) && !process.argv.includes('--skip-locked-pool')) {
+      if (pl.itemCount > 0 && isMembersOnlyPlaylist(pl.title) && !skipLockedPool && !incremental) {
         const lockedItems = await fetchPlaylistItems(pl.id, 3);
         const plLang = detectSubLanguage(pl.title, defaultLang);
         if (plLang !== 'other') {
@@ -109,6 +144,18 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
         }
       }
       continue;
+    }
+
+    if (incremental) {
+      const existingPl = existingPlaylistMap.get(pl.id);
+      const isUnchanged =
+        existingPl &&
+        (existingPl.playlistItemCount === pl.itemCount ||
+          (existingPl.playlistItemCount === null && existingPl.episodeCount > 0 && pl.itemCount === existingPl.episodeCount));
+      if (isUnchanged) {
+        skippedUnchangedPlaylists++;
+        continue;
+      }
     }
 
     const items = await fetchPlaylistItems(pl.id, 10);
@@ -144,8 +191,8 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
     db.prepare(
       `INSERT INTO channel_series (
         channel_id, series_id, playlist_id, playlist_title, playlist_url,
-        thumbnail_url, sub_language, episode_count, access_note, published_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free', ?)
+        thumbnail_url, sub_language, episode_count, playlist_item_count, access_note, published_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', ?)
       ON CONFLICT(channel_id, playlist_id) DO UPDATE SET
         series_id = excluded.series_id,
         playlist_title = excluded.playlist_title,
@@ -153,6 +200,7 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
         thumbnail_url = COALESCE(excluded.thumbnail_url, channel_series.thumbnail_url),
         sub_language = excluded.sub_language,
         episode_count = excluded.episode_count,
+        playlist_item_count = excluded.playlist_item_count,
         access_note = 'free'`
     ).run(
       channel.id,
@@ -163,6 +211,7 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
       thumb,
       detectedLang,
       validFreeItems.length,
+      pl.itemCount,
       toUnixSeconds(pl.publishedAt)
     );
 
@@ -229,14 +278,21 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
 
   // Fallback: scan recent uploads for standalone full-episode uploads not in any playlist
   if (channel.uploads_playlist_id) {
-    const uploads = await fetchPlaylistItems(channel.uploads_playlist_id, 4);
+    const uploads = await fetchPlaylistItems(channel.uploads_playlist_id, incremental ? 1 : 4);
+    const existingChannelVideoSet = new Set(
+      (
+        db
+          .prepare('SELECT youtube_video_id FROM episodes WHERE channel_id = ?')
+          .all(channel.id) as unknown as Array<{ youtube_video_id: string }>
+      ).map((r) => r.youtube_video_id)
+    );
     const unplaylistedByKey = new Map<
       string,
       { displayTitle: string; lang: SubLanguage; items: typeof uploads }
     >();
 
     for (const item of uploads) {
-      if (seenVideoIds.has(item.videoId) || isPromoVideo(item.title)) continue;
+      if (seenVideoIds.has(item.videoId) || existingChannelVideoSet.has(item.videoId) || isPromoVideo(item.title)) continue;
       if (isMembersOnlyText(`${item.title} ${item.description}`)) continue;
       const epNum = extractEpisodeNumber(item.title);
       if (epNum === null) continue;
@@ -309,9 +365,9 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
     }
   }
 
-  // Enrich new videos with views, likes, comments, upload date, tags, duration, & API members-only verification
-  if (newVideoIdsForDetails.length > 0 && !process.argv.includes('--skip-video-details')) {
-    const detailsMap = await fetchVideoDetailsMap(newVideoIdsForDetails.slice(0, 1500));
+  // Enrich new videos with views, likes, comments, upload date, tags, duration, embeddability, & members-only verification
+  if (newVideoIdsForDetails.length > 0 && !skipVideoDetails) {
+    const detailsMap = await fetchVideoDetailsMap(newVideoIdsForDetails);
     const updateEp = db.prepare(
       `UPDATE episodes
        SET duration_iso = ?,
@@ -327,14 +383,18 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
            details_synced_at = unixepoch()
        WHERE channel_id = ? AND youtube_video_id = ?`
     );
-    const deleteLockedEp = db.prepare('DELETE FROM episodes WHERE channel_id = ? AND youtube_video_id = ?');
+    const deleteRemovedEp = db.prepare('DELETE FROM episodes WHERE channel_id = ? AND youtube_video_id = ?');
 
     db.exec('BEGIN');
     try {
       for (const [vid, d] of detailsMap) {
+        if (!d.embeddable) {
+          deleteRemovedEp.run(channel.id, vid);
+          continue;
+        }
         if (d.isMembersOnly || isMembersOnlyText(`${d.title} ${d.description}`)) {
           recordLocked.run(vid, channel.id, null, null, d.title, defaultLang, 'api_viewcount_missing');
-          deleteLockedEp.run(channel.id, vid);
+          deleteRemovedEp.run(channel.id, vid);
           continue;
         }
         updateEp.run(
@@ -367,34 +427,59 @@ export async function syncChannel(db: ReturnType<typeof openDatabase>, channel: 
     playlists.length,
     channel.id
   );
-  console.log(`  -> Synced ${syncedPlaylists} free anime series playlists (${seenVideoIds.size} videos).`);
+  console.log(
+    `  -> Synced ${syncedPlaylists} free anime series playlists (${seenVideoIds.size} videos${skippedUnchangedPlaylists ? `, skipped ${skippedUnchangedPlaylists} unchanged` : ''}).`
+  );
 }
 
 export async function runSync() {
   const db = openDatabase();
   const channelFilterArg = process.argv.find((a) => a.startsWith('--channel='));
-  const channelFilter = channelFilterArg ? channelFilterArg.split('=')[1] : null;
+  const channelFilter = channelFilterArg ? channelFilterArg.split('=').slice(1).join('=') : null;
+  const incremental = process.argv.includes('--incremental');
+  const onlyUnsynced = process.argv.includes('--only-unsynced');
+  const skipSeedReconcile = process.argv.includes('--skip-seed-reconcile');
+
+  if (!channelFilter && !skipSeedReconcile) {
+    try {
+      await reconcileMissingSeedChannels(db);
+    } catch (err) {
+      console.warn('Seed channel reconciliation skipped:', err instanceof Error ? err.message : err);
+    }
+  }
 
   const channels = (
     channelFilter
       ? db
           .prepare('SELECT * FROM channels WHERE is_verified = 1 AND (youtube_channel_id = ? OR name LIKE ?)')
           .all(channelFilter, `%${channelFilter}%`)
-      : db.prepare('SELECT * FROM channels WHERE is_verified = 1 ORDER BY id ASC').all()
+      : onlyUnsynced
+        ? db.prepare('SELECT * FROM channels WHERE is_verified = 1 AND last_synced_at IS NULL ORDER BY id ASC').all()
+        : db.prepare('SELECT * FROM channels WHERE is_verified = 1 ORDER BY id ASC').all()
   ) as unknown as ChannelRow[];
 
   if (channels.length === 0) {
-    console.log('No verified channels found in DB. Run `npm run discover` first.');
+    console.log(
+      onlyUnsynced
+        ? 'All verified channels have already been synced at least once.'
+        : 'No verified channels found in DB. Run `npm run discover` first.'
+    );
     closeDatabase();
     return;
   }
 
   for (const ch of channels) {
     try {
-      await syncChannel(db, ch);
+      await syncChannel(db, ch, { incremental: onlyUnsynced ? false : incremental });
     } catch (err) {
       console.error(`  [error] Failed syncing ${ch.name}:`, err instanceof Error ? err.message : err);
     }
+  }
+
+  if (!channelFilter && !incremental && !onlyUnsynced) {
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('last_full_sync_at', unixepoch()) ON CONFLICT(key) DO UPDATE SET dirty = unixepoch()"
+    ).run();
   }
 
   const stats = db
@@ -411,7 +496,8 @@ export async function runSync() {
   closeDatabase();
 }
 
-const isDirect = process.argv[1]?.replace(/\\/g, '/').endsWith('sync-channels.ts');
+const isDirect =
+  Boolean(process.argv[1]) && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isDirect) {
   runSync().catch((err) => {
     console.error(err);

@@ -52,6 +52,9 @@ function migrateExistingSchema(db: DatabaseSync): void {
   ensureColumn(db, 'episodes', 'unlocked_at', 'INTEGER');
   ensureColumn(db, 'episodes', 'expires_at', 'INTEGER');
 
+  // Channel series incremental sync tracking
+  ensureColumn(db, 'channel_series', 'playlist_item_count', 'INTEGER');
+
   // Live streams geo metadata columns
   ensureColumn(db, 'live_streams', 'region_allowed', 'TEXT');
   ensureColumn(db, 'live_streams', 'region_blocked', 'TEXT');

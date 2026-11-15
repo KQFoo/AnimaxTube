@@ -59,6 +59,7 @@ export interface ChannelSeriesRow {
   thumbnail_url: string | null;
   sub_language: string;
   episode_count: number;
+  playlist_item_count: number | null;
   access_note: string;
   published_at: number | null;
 }
@@ -170,6 +171,7 @@ CREATE TABLE IF NOT EXISTS channel_series (
   thumbnail_url TEXT,
   sub_language TEXT NOT NULL DEFAULT 'en',
   episode_count INTEGER NOT NULL DEFAULT 0,
+  playlist_item_count INTEGER,
   access_note TEXT NOT NULL DEFAULT 'free',
   published_at INTEGER,
   UNIQUE(channel_id, playlist_id)

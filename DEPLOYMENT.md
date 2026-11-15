@@ -36,9 +36,12 @@ This folds `animaxtube.db-wal` cleanly into `animaxtube.db` and writes a compres
    PUBLIC_ORIGIN=https://your-service.up.railway.app
    ENABLE_AUTO_SYNC=true
    LIVE_SYNC_INTERVAL_MIN=30
+   INCREMENTAL_SYNC_INTERVAL_HOURS=4
    CHANNEL_SYNC_INTERVAL_HOURS=24
+   CHANNEL_DISCOVERY_INTERVAL_HOURS=168
+   ADMIN_TOKEN=generate_a_long_random_secret_at_least_16_chars
    ```
-   > **Important:** `RAILWAY_RUN_UID=0` is required so the container can read and write Railway's root-mounted `/app/data` volume cleanly.
+   > **Important:** `RAILWAY_RUN_UID=0` is required so the container can read and write Railway's root-mounted `/app/data` volume cleanly. `ADMIN_TOKEN` unlocks the stealth `/admin` dashboard (leave unset to keep `/admin` disabled).
 
 ---
 
@@ -66,6 +69,23 @@ railway restart
 1. Visit `/api/health` — confirm `"ok": true` and full series/episode counts.
 2. Visit the homepage — confirm **Live Marathons & Premieres** populates within ~60–90 seconds after startup (triggered by the initial `live-and-unlocks.ts` warmup when `ENABLE_AUTO_SYNC=true`).
 3. **(Optional) Custom Domain + Cloudflare Proxy:** Point your domain CNAME to Railway in Cloudflare (Orange Cloud proxied) for `cf-ipcountry` geo-detection headers and edge caching of `/api/*` (`max-age=60`).
+
+---
+
+## Adding New Channels Later
+
+You can add official anime/donghua YouTube channels in three ways:
+
+1. **Private Browser Admin (`/admin`):**
+   - Set `ADMIN_TOKEN` (16+ chars) in Railway Variables.
+   - Public visitors hitting `/admin` or `/api/admin/*` receive plain `404 Not Found` (completely hidden).
+   - Bookmark `https://your-service.up.railway.app/admin?token=YOUR_ADMIN_TOKEN`. Opening it exchanges the token for a signed `HttpOnly` cookie, redirects cleanly to `/admin`, and lets you paste any YouTube URL/`@handle` or approve/reject weekly search candidates (`search_pending`).
+2. **CLI (Local or via `railway ssh`):**
+   ```bash
+   npm run channel:add -- https://www.youtube.com/@SomeOfficialChannel
+   ```
+3. **Code Registry ([`src/discovery/channel-registry.ts`](src/discovery/channel-registry.ts)):**
+   - Append to `SEED_CHANNELS` and deploy; the next scheduled sync (`reconcileMissingSeedChannels`) picks up new registry entries automatically.
 
 ---
 

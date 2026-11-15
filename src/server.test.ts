@@ -215,3 +215,144 @@ test('Hono API serves channels, grouped series, FTS search, and series detail', 
 
   closeDatabase();
 });
+
+test('Stealth /admin UI and /api/admin/* are hidden from public and allow authorized management', async () => {
+  closeDatabase();
+  const db = openDatabase(':memory:');
+  const prevToken = process.env.ADMIN_TOKEN;
+  const triggeredSyncs: string[] = [];
+
+  try {
+    delete process.env.ADMIN_TOKEN;
+    const disabledApp = createApp(':memory:');
+    assert.equal((await disabledApp.request('/admin')).status, 404);
+    assert.equal((await disabledApp.request('/admin?token=anything-here-123456')).status, 404);
+    assert.equal((await disabledApp.request('/api/admin/channels')).status, 404);
+
+    process.env.ADMIN_TOKEN = 'super-secret-admin-token-1234';
+    db.prepare(
+      `INSERT INTO channels (youtube_channel_id, handle, name, url, sub_languages, category, region_focus, discovery_source, is_verified, playlist_count)
+       VALUES ('UC_PENDING_1', '@PendingAnime', 'Pending Anime', 'https://www.youtube.com/@PendingAnime', '["en"]', 'anime', 'Global', 'search_pending', 0, 5)`
+    ).run();
+
+    const app = createApp(':memory:', {
+      admin: {
+        jobs: {
+          triggerLiveCheck: () => true,
+          triggerChannelSync: (id?: string) => {
+            if (id) triggeredSyncs.push(id);
+            return true;
+          },
+          triggerIncrementalSync: () => true,
+          triggerFullSync: () => true,
+          triggerDiscovery: () => true,
+          getStatus: () => ({
+            runningJob: null,
+            startedAt: null,
+            lastFinishedJob: null,
+            lastFinishedAt: null,
+            lastExitCode: null,
+            queuedCount: 0,
+            autoSyncEnabled: false,
+            hasYouTubeApiKey: true,
+          }),
+          stop: () => {},
+        },
+        addChannel: async (targetDb, rawInput) => {
+          const res = targetDb
+            .prepare(
+              `INSERT INTO channels (youtube_channel_id, handle, name, url, sub_languages, category, region_focus, discovery_source, is_verified, playlist_count)
+               VALUES ('UC_ADDED_BY_ADMIN', '@NewSubAnime', 'New Sub Anime', 'https://www.youtube.com/@NewSubAnime', '["en"]', 'anime', 'Global', 'manual', 1, 9)`
+            )
+            .run();
+          return {
+            ok: true,
+            channelId: Number(res.lastInsertRowid),
+            youtubeChannelId: 'UC_ADDED_BY_ADMIN',
+            name: `Added ${rawInput}`,
+            handle: '@NewSubAnime',
+            url: 'https://www.youtube.com/@NewSubAnime',
+            playlistCount: 9,
+            qualifyingPlaylists: 9,
+            subLanguages: ['en'],
+          };
+        },
+      },
+    });
+
+    // Unauthenticated visitors get plain 404 on /admin, /admin/app.js, and /api/admin/*
+    assert.equal((await app.request('/admin')).status, 404);
+    assert.equal((await app.request('/admin?token=wrong-token-0000000')).status, 404);
+    assert.equal((await app.request('/admin/app.js')).status, 404);
+    assert.equal((await app.request('/api/admin/channels')).status, 404);
+
+    // Pending channel stays hidden from public /api/channels
+    const pubBefore = (await (await app.request('/api/channels')).json()) as any;
+    assert.equal(pubBefore.channels.length, 0);
+
+    // Valid token query sets HttpOnly; SameSite=Strict cookie and redirects cleanly to /admin
+    const loginRes = await app.request('/admin?token=super-secret-admin-token-1234');
+    assert.equal(loginRes.status, 302);
+    assert.equal(loginRes.headers.get('location'), '/admin');
+    const setCookie = loginRes.headers.get('set-cookie') || '';
+    assert.match(setCookie, /animaxtube_admin=/);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /SameSite=Strict/i);
+    const cookieHeader = setCookie.split(';')[0];
+
+    // Authenticated /admin and /admin/app.js succeed with noindex/no-store
+    const adminRes = await app.request('/admin', { headers: { cookie: cookieHeader } });
+    assert.equal(adminRes.status, 200);
+    assert.equal(adminRes.headers.get('x-robots-tag'), 'noindex, nofollow');
+    assert.match(await adminRes.text(), /AnimaxTube Private Channel Admin/);
+
+    const adminJsRes = await app.request('/admin/app.js', { headers: { cookie: cookieHeader } });
+    assert.equal(adminJsRes.status, 200);
+
+    // Cookie mutation with mismatched Origin is blocked
+    const csrfBlocked = await app.request('/api/admin/channels', {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader,
+        origin: 'https://evil.example',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ channel: '@NewSubAnime' }),
+    });
+    assert.equal(csrfBlocked.status, 403);
+
+    // Authenticated POST /api/admin/channels adds & queues sync
+    const addRes = await app.request('/api/admin/channels', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer super-secret-admin-token-1234',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ channel: '@NewSubAnime' }),
+    });
+    assert.equal(addRes.status, 200);
+    const addJson = (await addRes.json()) as any;
+    assert.equal(addJson.ok, true);
+    assert.equal(addJson.syncQueued, true);
+    assert.deepEqual(triggeredSyncs, ['UC_ADDED_BY_ADMIN']);
+
+    // Approve pending candidate #1
+    const approveRes = await app.request('/api/admin/channels/1/approve', {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    assert.equal(approveRes.status, 200);
+    assert.deepEqual(triggeredSyncs, ['UC_ADDED_BY_ADMIN', 'UC_PENDING_1']);
+
+    const pubAfter = (await (await app.request('/api/channels')).json()) as any;
+    assert.equal(pubAfter.channels.length, 2);
+  } finally {
+    if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
+    else process.env.ADMIN_TOKEN = prevToken;
+    closeDatabase();
+  }
+});

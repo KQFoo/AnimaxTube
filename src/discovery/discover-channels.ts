@@ -1,18 +1,19 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { openDatabase, closeDatabase } from '../db/index.ts';
 import { DISCOVERY_SEARCH_QUERIES, SEED_CHANNELS, type SeedChannelSpec } from './channel-registry.ts';
+import { upsertChannel, verifyChannelHasFreeAnimeSeries } from './add-channel.ts';
 import {
-  fetchAllPlaylists,
   fetchChannelByHandle,
   fetchChannelsByIds,
-  fetchPlaylistItems,
   getSessionQuotaUnits,
   searchChannels,
   type YtChannelInfo,
 } from '../lib/youtube.ts';
-import { detectSubLanguage, extractEpisodeNumber, isNonSeriesPlaylist } from '../ingestion/title-parser.ts';
 
 const SKIP_CHANNEL_SEARCH = process.argv.includes('--seed-only');
+const AUTO_APPROVE_SEARCH = process.argv.includes('--auto-approve-search');
 
 const EXCLUDED_KEYWORDS = [
   'amv',
@@ -58,119 +59,8 @@ function looksLikeNonEpisodeChannel(title: string, description: string): boolean
   return hasExcluded;
 }
 
-async function verifyChannelHasFreeAnimeSeries(
-  info: YtChannelInfo,
-  langHint: 'en' | 'zh-Hant' | 'zh-Hans',
-  isSeeded: boolean
-): Promise<{ ok: boolean; playlistCount: number; subLanguages: string[] }> {
-  const playlists = await fetchAllPlaylists(info.id, 3);
-  const seriesPlaylists = playlists.filter((p) => p.itemCount >= 2 && !isNonSeriesPlaylist(p.title));
-  const langs = new Set<string>();
-  let otherLangCount = 0;
-
-  for (const p of seriesPlaylists.slice(0, 30)) {
-    const lang = detectSubLanguage(p.title, 'other');
-    if (lang === 'en' || lang === 'zh-Hant' || lang === 'zh-Hans') {
-      langs.add(lang);
-    } else if (lang === 'multi') {
-      langs.add('en');
-      langs.add(langHint.startsWith('zh') ? langHint : 'zh-Hant');
-    } else {
-      // Check if title contains explicit Indonesian/Malay/Thai/Viet markers
-      if (/sub\s*indo|indo\s*sub|bahasa|ซับไทย|vietsub|thuyết minh/i.test(p.title)) {
-        otherLangCount++;
-      } else if (isSeeded) {
-        langs.add(langHint);
-      }
-    }
-  }
-
-  // Also check recent uploads if playlist signal is weak (only for seeded or playlist-bearing channels)
-  let episodeUploadHits = 0;
-  if (seriesPlaylists.length === 0 && isSeeded && info.uploadsPlaylistId) {
-    const uploads = await fetchPlaylistItems(info.uploadsPlaylistId, 1);
-    for (const item of uploads.slice(0, 30)) {
-      if (extractEpisodeNumber(item.title) !== null) {
-        episodeUploadHits++;
-        const lang = detectSubLanguage(item.title, langHint);
-        if (lang === 'en' || lang === 'zh-Hant' || lang === 'zh-Hans') {
-          langs.add(lang);
-        }
-      }
-    }
-  }
-
-  // Require at least 2 qualifying playlists for search-discovered channels (prevents spam/empty channels)
-  const hasPlaylists = isSeeded
-    ? seriesPlaylists.length >= 1 || episodeUploadHits >= 3
-    : seriesPlaylists.length >= 3 && langs.size > 0 && otherLangCount < seriesPlaylists.length / 2;
-
-  const ok =
-    hasPlaylists &&
-    (langs.size > 0 || (isSeeded && ANIME_SIGNAL_RE.test(`${info.title} ${info.description}`)));
-
-  return {
-    ok,
-    playlistCount: playlists.length,
-    subLanguages: langs.size > 0 ? [...langs] : [langHint],
-  };
-}
-
-function upsertChannel(
-  db: ReturnType<typeof openDatabase>,
-  data: {
-    info: YtChannelInfo;
-    handle: string | null;
-    category: 'anime' | 'donghua' | 'studio';
-    regionFocus: string;
-    subLanguages: string[];
-    discoverySource: string;
-    playlistCount: number;
-  }
-) {
-  const handle = data.handle || data.info.customUrl || null;
-  const url = handle
-    ? `https://www.youtube.com/${handle.startsWith('@') ? handle : `@${handle}`}`
-    : `https://www.youtube.com/channel/${data.info.id}`;
-
-  db.prepare(
-    `INSERT INTO channels (
-      youtube_channel_id, handle, name, url, avatar_url, description,
-      uploads_playlist_id, region_focus, sub_languages, category,
-      discovery_source, is_verified, playlist_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    ON CONFLICT(youtube_channel_id) DO UPDATE SET
-      handle = COALESCE(excluded.handle, channels.handle),
-      name = excluded.name,
-      url = excluded.url,
-      avatar_url = COALESCE(excluded.avatar_url, channels.avatar_url),
-      description = excluded.description,
-      uploads_playlist_id = COALESCE(excluded.uploads_playlist_id, channels.uploads_playlist_id),
-      region_focus = COALESCE(excluded.region_focus, channels.region_focus),
-      sub_languages = excluded.sub_languages,
-      category = excluded.category,
-      playlist_count = excluded.playlist_count,
-      is_verified = 1`
-  ).run(
-    data.info.id,
-    handle,
-    data.info.title,
-    url,
-    data.info.avatarUrl,
-    data.info.description.slice(0, 500),
-    data.info.uploadsPlaylistId,
-    data.regionFocus,
-    JSON.stringify([...new Set(data.subLanguages)]),
-    data.category,
-    data.discoverySource,
-    data.playlistCount
-  );
-}
-
 export async function runDiscovery() {
   const db = openDatabase();
-  // Reset verification flag before re-evaluating so stale non-EN/ZH or spam channels drop cleanly
-  db.exec('UPDATE channels SET is_verified = 0');
   const seenIds = new Set<string>();
   const resolvedSeeds: Array<{ spec: SeedChannelSpec; info: YtChannelInfo }> = [];
 
@@ -216,6 +106,7 @@ export async function runDiscovery() {
         regionFocus: spec.regionFocus,
         subLanguages: mergedLangs,
         discoverySource: 'registry',
+        isVerified: true,
         playlistCount: check.playlistCount,
       });
       console.log(`  [ok] ${info.title} (${info.id}) — ${check.playlistCount} playlists [${mergedLangs.join(', ')}]`);
@@ -249,10 +140,19 @@ export async function runDiscovery() {
     const candidateIds = [...candidateMap.keys()];
     if (candidateIds.length > 0) {
       console.log(`Evaluating ${candidateIds.length} newly discovered candidate channels...`);
+      const existingStatusStmt = db.prepare(
+        'SELECT discovery_source, is_verified FROM channels WHERE youtube_channel_id = ? LIMIT 1'
+      );
       const infos = await fetchChannelsByIds(candidateIds);
       for (const info of infos) {
         if (seenIds.has(info.id)) continue;
         seenIds.add(info.id);
+        const existing = existingStatusStmt.get(info.id) as
+          | { discovery_source: string; is_verified: number }
+          | undefined;
+        if (existing && (existing.is_verified === 1 || existing.discovery_source === 'rejected')) {
+          continue;
+        }
         const hint = candidateMap.get(info.id)?.langHint || 'en';
         try {
           const check = await verifyChannelHasFreeAnimeSeries(info, hint, false);
@@ -263,23 +163,36 @@ export async function runDiscovery() {
             category: /bilibili|tencent|youku|iqiyi|donghua/i.test(info.title) ? 'donghua' : 'anime',
             regionFocus: hint.startsWith('zh') ? 'TW/HK/Global' : 'Global/Asia',
             subLanguages: check.subLanguages,
-            discoverySource: 'search',
+            discoverySource: AUTO_APPROVE_SEARCH ? 'search' : 'search_pending',
+            isVerified: AUTO_APPROVE_SEARCH,
             playlistCount: check.playlistCount,
           });
-          console.log(`  [discovered] ${info.title} (${info.id}) — ${check.playlistCount} playlists [${check.subLanguages.join(', ')}]`);
+          console.log(
+            `  [${AUTO_APPROVE_SEARCH ? 'discovered' : 'queued-pending'}] ${info.title} (${info.id}) — ${check.playlistCount} playlists [${check.subLanguages.join(', ')}]`
+          );
         } catch (err) {
           console.warn(`  [warn] Candidate verification failed for ${info.title}:`, err instanceof Error ? err.message : err);
         }
       }
     }
+
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('last_discovery_at', unixepoch()) ON CONFLICT(key) DO UPDATE SET dirty = unixepoch()"
+    ).run();
   }
 
   const total = db.prepare('SELECT COUNT(*) AS cnt FROM channels WHERE is_verified = 1').get() as { cnt: number };
-  console.log(`\nDiscovery complete: ${total.cnt} verified channels stored. YouTube quota used: ~${getSessionQuotaUnits()} units.`);
+  const pending = db
+    .prepare("SELECT COUNT(*) AS cnt FROM channels WHERE is_verified = 0 AND discovery_source = 'search_pending'")
+    .get() as { cnt: number };
+  console.log(
+    `\nDiscovery complete: ${total.cnt} verified channels (${pending.cnt} pending review). YouTube quota used: ~${getSessionQuotaUnits()} units.`
+  );
   closeDatabase();
 }
 
-const isDirect = process.argv[1]?.replace(/\\/g, '/').endsWith('discover-channels.ts');
+const isDirect =
+  Boolean(process.argv[1]) && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (isDirect) {
   runDiscovery().catch((err) => {
     console.error(err);
