@@ -253,8 +253,20 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
             lastFinishedAt: null,
             lastExitCode: null,
             queuedCount: 0,
-            autoSyncEnabled: false,
+            autoSyncEnabled: true,
             hasYouTubeApiKey: true,
+            intervals: {
+              liveMinutes: 30,
+              incrementalHours: 4,
+              channelHours: 24,
+              discoveryHours: 168,
+            },
+            nextRunAt: {
+              liveAt: 2000000000,
+              incrementalAt: 2000014400,
+              fullSyncAt: 2000086400,
+              discoveryAt: 2000604800,
+            },
           }),
           stop: () => {},
         },
@@ -285,6 +297,7 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
     assert.equal((await app.request('/admin?token=wrong-token-0000000')).status, 404);
     assert.equal((await app.request('/admin/app.js')).status, 404);
     assert.equal((await app.request('/api/admin/channels')).status, 404);
+    assert.equal((await app.request('/api/admin/jobs')).status, 404);
 
     // Pending channel stays hidden from public /api/channels
     const pubBefore = (await (await app.request('/api/channels')).json()) as any;
@@ -304,10 +317,18 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
     const adminRes = await app.request('/admin', { headers: { cookie: cookieHeader } });
     assert.equal(adminRes.status, 200);
     assert.equal(adminRes.headers.get('x-robots-tag'), 'noindex, nofollow');
-    assert.match(await adminRes.text(), /AnimaxTube Private Channel Admin/);
+    const adminHtml = await adminRes.text();
+    assert.match(adminHtml, /AnimaxTube Private Channel Admin/);
+    assert.match(adminHtml, /id="scheduleCountdowns"/);
 
     const adminJsRes = await app.request('/admin/app.js', { headers: { cookie: cookieHeader } });
     assert.equal(adminJsRes.status, 200);
+
+    const jobsRes = await app.request('/api/admin/jobs', { headers: { cookie: cookieHeader } });
+    assert.equal(jobsRes.status, 200);
+    const jobsJson = (await jobsRes.json()) as any;
+    assert.equal(jobsJson.jobs.intervals.incrementalHours, 4);
+    assert.equal(jobsJson.jobs.nextRunAt.incrementalAt, 2000014400);
 
     // Cookie mutation with mismatched Origin is blocked
     const csrfBlocked = await app.request('/api/admin/channels', {

@@ -10,6 +10,18 @@ export interface JobStatusSnapshot {
   queuedCount: number;
   autoSyncEnabled: boolean;
   hasYouTubeApiKey: boolean;
+  intervals: {
+    liveMinutes: number;
+    incrementalHours: number;
+    channelHours: number;
+    discoveryHours: number;
+  };
+  nextRunAt: {
+    liveAt: number | null;
+    incrementalAt: number | null;
+    fullSyncAt: number | null;
+    discoveryAt: number | null;
+  };
 }
 
 export interface JobCoordinator {
@@ -98,6 +110,13 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
   let pendingFullSync = false;
   let pendingIncremental = false;
   let pendingLive = false;
+
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  let nextLiveAt: number | null = autoSyncEnabled && canSpawn ? nowSec() + 60 : null;
+  let nextIncrementalAt: number | null = autoSyncEnabled && canSpawn ? nowSec() + incrementalHours * 3600 : null;
+  let nextFullSyncAt: number | null = autoSyncEnabled && canSpawn ? nowSec() + channelHours * 3600 : null;
+  let nextDiscoveryAt: number | null =
+    autoSyncEnabled && canSpawn && discoveryHours > 0 ? nowSec() + discoveryHours * 3600 : null;
 
   const queuedCount = () =>
     pendingChannelIds.size +
@@ -212,6 +231,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
           console.warn('[scheduler] Startup overdue check failed:', err instanceof Error ? err.message : err);
         }
       }
+      nextLiveAt = nowSec() + liveMinutes * 60;
       pendingLive = true;
       drainQueue();
     }, 60_000);
@@ -219,6 +239,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     timers.push(warmupTimer);
 
     const liveTimer = setInterval(() => {
+      nextLiveAt = nowSec() + liveMinutes * 60;
       enqueue(() => {
         pendingLive = true;
       });
@@ -227,6 +248,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     timers.push(liveTimer);
 
     const incrementalTimer = setInterval(() => {
+      nextIncrementalAt = nowSec() + incrementalHours * 3600;
       enqueue(() => {
         pendingIncremental = true;
       });
@@ -235,6 +257,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     timers.push(incrementalTimer);
 
     const channelTimer = setInterval(() => {
+      nextFullSyncAt = nowSec() + channelHours * 3600;
       enqueue(() => {
         pendingFullSync = true;
       });
@@ -244,6 +267,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
 
     if (discoveryHours > 0) {
       const discoveryTimer = setInterval(() => {
+        nextDiscoveryAt = nowSec() + discoveryHours * 3600;
         enqueue(() => {
           pendingDiscovery = true;
         });
@@ -290,6 +314,18 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
       queuedCount: queuedCount(),
       autoSyncEnabled,
       hasYouTubeApiKey: hasYouTubeApiKey(),
+      intervals: {
+        liveMinutes,
+        incrementalHours,
+        channelHours,
+        discoveryHours,
+      },
+      nextRunAt: {
+        liveAt: nextLiveAt,
+        incrementalAt: nextIncrementalAt,
+        fullSyncAt: nextFullSyncAt,
+        discoveryAt: nextDiscoveryAt,
+      },
     }),
     stop: () => {
       stopped = true;

@@ -188,6 +188,7 @@ const ADMIN_HTML = `<!doctype html>
 
     <section class="card">
       <div id="summaryStats" class="stats">Loading status...</div>
+      <div id="scheduleCountdowns" class="stats" style="margin-top:8px;"></div>
       <div id="actionStatus" class="status"></div>
     </section>
 
@@ -240,6 +241,8 @@ const ADMIN_HTML = `<!doctype html>
 const ADMIN_APP_JS = `(() => {
   const $ = (id) => document.getElementById(id);
   const statusEl = $('actionStatus');
+  let latestJobs = null;
+  let pollTimer = null;
 
   function setStatus(msg, isError = false) {
     statusEl.textContent = msg || '';
@@ -249,6 +252,82 @@ const ADMIN_APP_JS = `(() => {
   function fmtTime(unixSec) {
     if (!unixSec) return 'never';
     return new Date(unixSec * 1000).toLocaleString();
+  }
+
+  function fmtCountdown(targetUnix) {
+    if (!targetUnix) return 'off';
+    const diff = Math.max(0, targetUnix - Math.floor(Date.now() / 1000));
+    if (diff === 0) return 'due now';
+    const d = Math.floor(diff / 86400);
+    const h = Math.floor((diff % 86400) / 3600);
+    const m = Math.floor((diff % 3600) / 60);
+    const s = diff % 60;
+    if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+    if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+    return m + 'm ' + s + 's';
+  }
+
+  function renderJobHeader(jobs) {
+    latestJobs = jobs || null;
+    const j = jobs || {};
+    const stats = $('summaryStats');
+    stats.textContent = '';
+    const counts = window.__adminCounts || { verified: '-', pending: '-' };
+    const items = [
+      ['Verified', String(counts.verified)],
+      ['Pending', String(counts.pending)],
+      ['Running job', j.runningJob || 'idle'],
+      ['Queued', String(j.queuedCount || 0)],
+      ['Last finished', j.lastFinishedJob ? (j.lastFinishedJob + ' (' + fmtTime(j.lastFinishedAt) + ', exit ' + j.lastExitCode + ')') : 'none'],
+    ];
+    for (const [label, val] of items) {
+      stats.appendChild(el('span', {}, label + ': ', el('strong', { text: val })));
+    }
+    renderCountdowns();
+    schedulePollIfActive(j);
+  }
+
+  function renderCountdowns() {
+    const wrap = $('scheduleCountdowns');
+    wrap.textContent = '';
+    if (!latestJobs) return;
+    if (!latestJobs.autoSyncEnabled) {
+      wrap.appendChild(el('span', { text: 'Auto-sync schedules disabled (set ENABLE_AUTO_SYNC=true to enable background timers).' }));
+      return;
+    }
+    const iv = latestJobs.intervals || {};
+    const next = latestJobs.nextRunAt || {};
+    const entries = [
+      ['Next live (' + (iv.liveMinutes || 30) + 'm)', fmtCountdown(next.liveAt)],
+      ['Next incremental (' + (iv.incrementalHours || 4) + 'h)', fmtCountdown(next.incrementalAt)],
+      ['Next full sweep (' + (iv.channelHours || 24) + 'h)', fmtCountdown(next.fullSyncAt)],
+      ['Next discovery (' + (iv.discoveryHours ? iv.discoveryHours + 'h' : 'off') + ')', iv.discoveryHours ? fmtCountdown(next.discoveryAt) : 'off'],
+    ];
+    for (const [label, val] of entries) {
+      wrap.appendChild(el('span', {}, label + ': ', el('strong', { text: val })));
+    }
+  }
+
+  function schedulePollIfActive(j) {
+    const active = Boolean(j && (j.runningJob || (j.queuedCount || 0) > 0));
+    if (active && !pollTimer) {
+      pollTimer = setInterval(async () => {
+        try {
+          const prevActive = Boolean(latestJobs && (latestJobs.runningJob || (latestJobs.queuedCount || 0) > 0));
+          const res = await api('/api/admin/jobs');
+          renderJobHeader(res.jobs);
+          const stillActive = Boolean(res.jobs && (res.jobs.runningJob || (res.jobs.queuedCount || 0) > 0));
+          if (prevActive && !stillActive) {
+            await loadState();
+          }
+        } catch {
+          // ignore transient poll failures
+        }
+      }, 4000);
+    } else if (!active && pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
   }
 
   async function api(url, method = 'GET', body) {
@@ -382,19 +461,11 @@ const ADMIN_APP_JS = `(() => {
   async function loadState() {
     try {
       const data = await api('/api/admin/channels');
-      const j = data.jobs || {};
-      const stats = $('summaryStats');
-      stats.textContent = '';
-      const items = [
-        ['Verified', String(data.verified.length)],
-        ['Pending', String(data.candidates.filter((c) => c.discoverySource !== 'rejected').length)],
-        ['Running job', j.runningJob || 'idle'],
-        ['Queued', String(j.queuedCount || 0)],
-        ['Last finished', j.lastFinishedJob ? (j.lastFinishedJob + ' (' + fmtTime(j.lastFinishedAt) + ', exit ' + j.lastExitCode + ')') : 'none'],
-      ];
-      for (const [label, val] of items) {
-        stats.appendChild(el('span', {}, label + ': ', el('strong', { text: val })));
-      }
+      window.__adminCounts = {
+        verified: data.verified.length,
+        pending: data.candidates.filter((c) => c.discoverySource !== 'rejected').length,
+      };
+      renderJobHeader(data.jobs);
       renderCandidates(data.candidates);
       renderVerified(data.verified);
     } catch (err) {
@@ -447,6 +518,7 @@ const ADMIN_APP_JS = `(() => {
     location.href = '/';
   };
 
+  setInterval(renderCountdowns, 1000);
   loadState();
 })();
 `;
@@ -630,6 +702,10 @@ export function registerAdminRoutes(app: Hono, db: DatabaseSync, opts: AdminRout
     if (!ch) return c.json({ error: 'Verified channel not found' }, 404);
     const queued = Boolean(opts.jobs?.triggerChannelSync(ch.youtube_channel_id));
     return c.json({ ok: true, queued });
+  });
+
+  app.get('/api/admin/jobs', (c) => {
+    return c.json({ jobs: opts.jobs?.getStatus() ?? null });
   });
 
   app.post('/api/admin/sync/incremental', (c) => c.json({ ok: true, queued: Boolean(opts.jobs?.triggerIncrementalSync()) }));
