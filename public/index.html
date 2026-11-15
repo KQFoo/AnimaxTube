@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <title>AnimaxTube</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" />
+  <script src="/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <button id="menuToggleBtn" class="icon-btn" aria-label="Toggle navigation">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/></svg>
+      </button>
+      <a href="/" class="brand" id="brandHomeLink">
+        <span class="brand-text">Animax<span class="brand-accent">Tube</span></span>
+      </a>
+    </div>
+
+    <form id="searchForm" class="search-wrap" role="search">
+      <button id="searchBackBtn" type="button" class="icon-btn search-back-btn" aria-label="Close search">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input
+        id="searchInput"
+        type="search"
+        placeholder="Search anime, #tags, or channels"
+        autocomplete="off"
+      />
+      <button id="clearSearchBtn" type="button" class="clear-btn" hidden aria-label="Clear search">✕</button>
+      <button type="submit" class="search-submit" aria-label="Search">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      </button>
+    </form>
+
+    <div class="topbar-right">
+      <button id="mobileSearchBtn" type="button" class="icon-btn mobile-search-btn" aria-label="Search">
+        <svg viewBox="0 0 24 24" width="21" height="21" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      </button>
+      <span id="regionBadge" class="region-badge" title="Auto-detected geo region">Detecting…</span>
+      <button id="themeToggleBtn" type="button" class="icon-btn theme-toggle-btn" aria-label="Switch to light mode" aria-pressed="false" title="Switch to light mode">
+        <svg class="theme-icon-sun" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 0 0 0-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/></svg>
+        <svg class="theme-icon-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12.34 2.02C6.59 1.82 2 6.42 2 12c0 5.52 4.48 10 10 10 3.71 0 6.93-2.02 8.66-5.02-7.51-.25-12.09-8.43-8.32-14.96z"/></svg>
+      </button>
+      <a href="/about" id="aboutBtn" class="icon-btn about-btn" data-route-link="about" aria-label="About, Legal &amp; DMCA" title="About, Legal &amp; DMCA">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11 18h2v-2h-2v2zm1-16C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-2.21 0-4 1.79-4 4h2c0-1.1.9-2 2-2s2 .9 2 2c0 2-3 1.75-3 5h2c0-2.25 3-2.5 3-5 0-2.21-1.79-4-4-4z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
+    <aside id="sidebar" class="sidebar">
+      <nav class="nav-list" aria-label="Primary">
+        <button class="nav-item active" data-view="series">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3 3 10.5V21h6v-6h6v6h6V10.5z"/></svg>
+          <span>Home</span>
+        </button>
+        <button class="nav-item" data-view="channels">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
+          <span>Channels</span>
+        </button>
+        <button class="nav-item" data-view="watchlist">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M17 3H7a2 2 0 0 0-2 2v16l7-3 7 3V5a2 2 0 0 0-2-2z"/></svg>
+          <span>Watchlist</span>
+        </button>
+        <button class="nav-item" data-view="history">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+          <span>History</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-divider"></div>
+      <div class="sidebar-section-title">Channels</div>
+      <div id="sidebarChannels" class="sidebar-channels"></div>
+
+      <div class="sidebar-divider"></div>
+      <nav class="nav-list" aria-label="Site">
+        <button class="nav-item" data-view="about">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11 7h2v2h-2zm0 4h2v6h-2zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg>
+          <span>About &amp; Legal</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <!-- SERIES BROWSE VIEW -->
+      <section id="seriesView" class="view">
+        <div class="yt-chipbar-wrap">
+          <div class="yt-chipbar-carousel">
+            <button id="chipPrevBtn" type="button" class="chip-scroll-btn prev" aria-label="Scroll filters left" hidden>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+            </button>
+            <div class="yt-chipbar" id="topChipBar">
+              <button class="chip active" data-lang="all" data-tag="">All</button>
+              <button class="chip" data-lang="en" data-tag="">English Sub</button>
+              <button class="chip" data-lang="zh" data-tag="">中文 / Chinese</button>
+              <span id="dynamicTagChips" class="chip-inline"></span>
+            </div>
+            <button id="chipNextBtn" type="button" class="chip-scroll-btn next" aria-label="Scroll filters right" hidden>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <section id="liveShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <h2 class="shelf-title"><span class="live-dot"></span> Live Marathons &amp; Premieres</h2>
+          </div>
+          <div id="liveShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <section id="unlockedShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <h2 class="shelf-title">Newly Published Officially</h2>
+          </div>
+          <div id="unlockedShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <section id="trendingShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <div>
+              <h2 class="shelf-title">Trending This Week</h2>
+              <p class="shelf-sub">Fastest-growing views over the last 7 days</p>
+            </div>
+          </div>
+          <div id="trendingShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <div id="forYouShelves"></div>
+
+        <section id="recsShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <div>
+              <h2 class="shelf-title">Fan Favorites</h2>
+              <p class="shelf-sub">Spoiler-safe buzz from Episode 1 comments</p>
+            </div>
+            <label class="shelf-toggle">
+              <input id="toggleCommentsCheckbox" type="checkbox" checked />
+              <span>Show quotes</span>
+            </label>
+          </div>
+          <div id="recsShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <section id="gemsShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <div>
+              <h2 class="shelf-title">Hidden Gems</h2>
+              <p class="shelf-sub">Loved by viewers, still under 500K views</p>
+            </div>
+          </div>
+          <div id="gemsShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <div class="shelf-header grid-header">
+          <div class="grid-header-left">
+            <h2 class="shelf-title">Browse All</h2>
+            <span id="activeFilterBadge" class="active-filter-pill" hidden>
+              <span id="activeFilterLabel"></span>
+              <button id="clearFiltersBtn" type="button" aria-label="Clear filter">✕</button>
+            </span>
+          </div>
+          <div class="filter-controls">
+            <div id="seriesCountLine" class="section-meta"></div>
+            <select id="sortSelect" class="sort-select" aria-label="Sort series">
+              <option value="recent">Newest</option>
+              <option value="views">Popularity</option>
+              <option value="episodes">Most Episodes</option>
+              <option value="az">Alphabetical</option>
+            </select>
+          </div>
+        </div>
+        <div id="seriesGrid" class="series-grid"></div>
+        <div id="seriesPagination" class="pagination" hidden>
+          <div id="loadMoreSentinel" class="infinite-sentinel" aria-live="polite">
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <span id="loadMoreStatus">Loading more series…</span>
+          </div>
+          <button id="loadMoreBtn" class="btn-outline" hidden>Show More</button>
+        </div>
+      </section>
+
+      <!-- CHANNELS VIEW -->
+      <section id="channelsView" class="view" hidden>
+        <div class="view-header">
+          <h1>Official Licensed Channels</h1>
+          <p id="channelsSubtitle">Licensed distributors publishing English- and Chinese-subtitled anime &amp; donghua on their own official YouTube channels (geo-filtered; channels licensed for other regions show 0).</p>
+        </div>
+        <div id="channelsGrid" class="channels-grid"></div>
+      </section>
+
+      <!-- WATCHLIST VIEW -->
+      <section id="watchlistView" class="view" hidden>
+        <div class="view-header">
+          <h1>Watchlist</h1>
+          <p>Series you bookmarked, saved locally in your browser.</p>
+        </div>
+        <div id="savedGrid" class="series-grid"></div>
+      </section>
+
+      <!-- HISTORY VIEW -->
+      <section id="historyView" class="view" hidden>
+        <div class="view-header view-header-row">
+          <div>
+            <h1>Watch History</h1>
+            <p>Recently watched episodes &amp; series on this device.</p>
+          </div>
+          <button id="clearHistoryBtn" type="button" class="btn-secondary" hidden>Clear History</button>
+        </div>
+        <div id="historyGrid" class="series-grid"></div>
+      </section>
+
+      <!-- WATCH VIEW -->
+      <section id="watchView" class="view" hidden>
+        <div class="watch-topbar">
+          <button id="backToBrowseBtn" class="btn-ghost">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></svg>
+            Back
+          </button>
+        </div>
+
+        <div class="watch-layout">
+          <div class="watch-primary">
+            <div id="playerFrame" class="player-frame">
+              <div id="ytPlayerMount"></div>
+              <div id="geoLockCard" class="geo-lock-card" hidden></div>
+            </div>
+
+            <div id="licensorBanner" class="licensor-banner" hidden></div>
+
+            <div class="watch-info">
+              <a id="watchSeriesTitle" class="watch-series-title"></a>
+              <h1 id="watchEpisodeTitle" class="watch-episode-title"></h1>
+
+              <div class="yt-watch-actions-bar">
+                <div id="watchChannelMeta" class="watch-channel-meta"></div>
+
+                <div class="yt-action-pills">
+                  <span id="watchLikePill" class="yt-pill">—</span>
+                  <span id="watchViewPill" class="yt-pill">—</span>
+                  <button id="saveSeriesBtn" class="yt-pill yt-pill-btn">+ Watchlist</button>
+                </div>
+              </div>
+
+              <div id="sourceSwitcher" class="source-switcher-row"></div>
+
+              <div id="watchDescBox" class="yt-desc-box">
+                <div class="yt-desc-stats">
+                  <span id="watchDescStats"></span>
+                  <span id="watchDescTags" class="yt-desc-tags"></span>
+                </div>
+                <p id="watchSynopsis" class="yt-desc-text"></p>
+                <p id="watchEpDescription" class="yt-desc-ep-text" hidden></p>
+                <div id="watchBuzzQuote" class="yt-buzz-callout" hidden></div>
+                <button id="toggleDescBtn" class="yt-desc-more" type="button">More Details</button>
+              </div>
+            </div>
+          </div>
+
+          <aside id="episodeQueuePanel" class="episode-queue">
+            <div class="queue-header">
+              <div>
+                <h2 class="queue-title">Episodes</h2>
+                <span id="queueSubInfo" class="queue-sub"></span>
+              </div>
+              <label class="auto-next-toggle">
+                <input id="autoNextCheckbox" type="checkbox" checked />
+                <span class="switch" aria-hidden="true"></span>
+                <span>Autoplay</span>
+              </label>
+            </div>
+            <div id="episodeList" class="episode-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ABOUT / LEGAL / DMCA VIEW -->
+      <section id="aboutView" class="view legal-view" hidden>
+        <div class="view-header">
+          <h1>About, Legal &amp; DMCA</h1>
+          <p>What AnimaxTube is, how regional licensing works, and how rights holders can reach us.</p>
+        </div>
+
+        <div class="legal-toc">
+          <a href="#legal-about">About</a>
+          <a href="#legal-hosting">A. Zero Content Hosting</a>
+          <a href="#legal-crawlers">B. Notice to Anti-Piracy Crawlers</a>
+          <a href="#legal-dmca">C. DMCA &amp; Opt-Out</a>
+          <a href="#legal-channels">Indexed Channels</a>
+        </div>
+
+        <article class="legal-card" id="legal-about">
+          <h2>About AnimaxTube</h2>
+          <p class="about-stats-row"><span id="aboutStats" class="stats-pill">Loading...</span></p>
+          <p>
+            AnimaxTube is a directory of anime and donghua that licensed distributors publish <strong>on their own official YouTube channels</strong>.
+            YouTube buries full-episode playlists from channels like Muse Asia or Ani-One Asia among clips and trailers. AnimaxTube groups those playlists by series,
+            puts English- and Chinese-subtitled releases side by side, and shows only what YouTube reports as playable in your region.
+          </p>
+          <p>
+            Your watchlist and history stay in your browser's local storage. There are no accounts, and we keep no server-side viewing profile.
+          </p>
+        </article>
+
+        <article class="legal-card" id="legal-hosting">
+          <h2>A. Zero Content Hosting</h2>
+          <ul>
+            <li><strong>AnimaxTube does not host, upload, store, transcode, cache, or proxy any video files.</strong> No media bytes pass through our servers.</li>
+            <li>Every episode plays through the <strong>official YouTube IFrame Player API</strong>, loaded directly from <code>youtube.com</code>, using the video ID published by the rights holder.</li>
+            <li>We only index content that the uploading channel has marked <strong>public</strong> and <strong>embeddable</strong>. Members-only, private, unlisted, and embed-disabled videos are excluded.</li>
+            <li>Views, watch-time, ad impressions, and ad revenue are credited by YouTube <strong>directly to the official channel</strong>. AnimaxTube runs no ads on or around the player, and does not block or strip the rights holder's YouTube ads.</li>
+            <li>Every watch page names the licensing channel and links to the original video and playlist on YouTube.</li>
+          </ul>
+        </article>
+
+        <article class="legal-card legal-card-notice" id="legal-crawlers">
+          <h2>B. Notice to Automated Anti-Piracy Crawlers &amp; Enforcement Agents</h2>
+          <p>
+            <strong>Split regional licensing.</strong> Many titles indexed here are licensed to <em>different companies in different territories</em>.
+            For example, one show may be licensed to Muse Asia for Southeast Asia and South Asia, Muse Communication (木棉花) for Taiwan/Hong Kong,
+            Ani-One Asia for parts of Asia-Pacific, and Crunchyroll, Netflix, or HIDIVE for North America and Europe. The YouTube uploads indexed here are
+            <strong>legitimate, licensed releases by the regional licensee</strong>, including but not limited to:
+          </p>
+          <ul class="legal-licensees">
+            <li>Muse Asia, Muse Malaysia, Muse Philippines, Muse India, Muse 木棉花 (TW/HK)</li>
+            <li>Ani-One Asia, Ani-One India, Ani-One Philippines, Ani-Mi</li>
+            <li>GUNDAM CHANNEL / GundamInfo (Bandai Namco Filmworks)</li>
+            <li>TMS Anime (TMS Entertainment), It's Anime / REMOW</li>
+            <li>Crunchyroll, RetroCrush, and other first-party publisher channels</li>
+            <li>Donghua publishers: bilibili, YOUKU, iQIYI, Tencent Video / WeTV</li>
+          </ul>
+          <p>
+            <strong>Native YouTube geo-blocking.</strong> Each licensee sets territorial restrictions on its own uploads. YouTube enforces them on every playback request,
+            and they cannot be bypassed through an embed. AnimaxTube also reads those country allow/block lists from the YouTube Data API.
+            For visitors outside the licensed territory, it <strong>does not load the player at all</strong>. Instead it shows a "Region Locked" notice that points to
+            the services licensed in that region.
+          </p>
+          <p>
+            <strong>Monetization integrity.</strong> Because playback happens inside YouTube's own player, the licensee keeps 100% of the views, telemetry, and ad revenue.
+            Embedding is a feature YouTube offers rights holders. An embedded official upload is not an unauthorized copy.
+          </p>
+          <p>
+            <strong>Before filing a notice:</strong> please open the "Watch on YouTube ↗" link on the watch page and confirm the uploader. If you are crawling from a
+            territory such as the US, UK, Ireland, or the EU, a title on this site may be licensed to your client in your territory and to a <em>different</em>
+            licensee in Asia at the same time. In that case the embedded upload is not infringing, and a takedown notice filed against it would be misdirected.
+          </p>
+        </article>
+
+        <article class="legal-card" id="legal-dmca">
+          <h2>C. DMCA, Takedowns &amp; Opt-Out</h2>
+          <ul>
+            <li>
+              <strong>Fastest removal (rights holders and channel owners):</strong> in YouTube Studio, turn off <em>Allow embedding</em> for the video, or make it private or unlisted.
+              Our sync drops non-embeddable and non-public videos automatically on the next refresh.
+            </li>
+            <li>
+              <strong>Infringing uploads on YouTube itself:</strong> AnimaxTube only indexes channels we have reviewed as official licensees.
+              If you believe a YouTube channel is uploading without a license, please also file through
+              <a href="https://support.google.com/youtube/answer/2807622" target="_blank" rel="noopener">YouTube's copyright process</a>. Removal at the source removes the item here automatically.
+            </li>
+          </ul>
+        </article>
+
+        <article class="legal-card" id="legal-channels">
+          <h2>Indexed Official Channels</h2>
+          <p class="legal-muted">Each channel's stated regional focus. Actual availability follows the per-video country restrictions YouTube reports.</p>
+          <div id="legalChannelList" class="legal-channel-list"></div>
+        </article>
+
+        <p class="legal-muted legal-trademarks">
+          All anime titles, artwork, and trademarks belong to their respective owners. AnimaxTube is not affiliated with YouTube, Google, or any of the licensors listed.
+        </p>
+      </section>
+
+      <footer class="site-footer">
+        <p>
+          <strong>AnimaxTube hosts no video files.</strong> All streams play through the official YouTube IFrame Player, directly from the licensed rights holder's channel.
+          Views and ad revenue go to the official licensee. Availability depends on regional licensing.
+        </p>
+        <p class="site-footer-links">
+          <a href="/about" data-route-link="about">About</a>
+          <a href="/legal" data-route-link="about">Legal &amp; DMCA</a>
+          <a href="/channels" data-route-link="channels">Official Channels</a>
+        </p>
+      </footer>
+    </main>
+  </div>
+
+  <nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Mobile Navigation">
+    <button class="mobile-nav-item active" data-view="series">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3 3 10.5V21h6v-6h6v6h6V10.5z"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="mobile-nav-item" data-view="channels">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
+      <span>Channels</span>
+    </button>
+    <button class="mobile-nav-item" data-view="watchlist">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M17 3H7a2 2 0 0 0-2 2v16l7-3 7 3V5a2 2 0 0 0-2-2z"/></svg>
+      <span>Watchlist</span>
+    </button>
+    <button class="mobile-nav-item" data-view="history">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+      <span>History</span>
+    </button>
+  </nav>
+
+  <script src="/js/player.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

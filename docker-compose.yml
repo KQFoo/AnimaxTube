@@ -1,0 +1,28 @@
+services:
+  animaxtube:
+    build: .
+    container_name: animaxtube
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_PATH: /app/data/animaxtube.db
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:3000:3000"
+    volumes:
+      - ./data:/app/data
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: animaxtube-tunnel
+    restart: unless-stopped
+    profiles:
+      - tunnel
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    network_mode: host
+    depends_on:
+      - animaxtube
