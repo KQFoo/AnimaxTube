@@ -243,6 +243,19 @@ test('compactDatabase checkpoints WAL into main sqlite file and ensureSeedDataba
     assert.equal(seeded, true);
     assert.equal(await ensureSeedDatabase(seededPath, `http://127.0.0.1:${addr.port}/bad.txt`), false);
 
+    // Also replaces an empty 0-series pre-initialized DB file + sidecars
+    const emptyPath = path.join(dir, 'empty.db');
+    openDatabase(emptyPath);
+    closeDatabase();
+    const replaced = await ensureSeedDatabase(emptyPath, `http://127.0.0.1:${addr.port}/animaxtube.db.gz`);
+    assert.equal(replaced, true);
+    const checkEmptyReplaced = openDatabase(emptyPath);
+    const r2 = checkEmptyReplaced
+      .prepare(`SELECT canonical_title FROM series WHERE slug = 'compact-test'`)
+      .get() as { canonical_title: string } | undefined;
+    assert.equal(r2?.canonical_title, 'Compact Test');
+    closeDatabase();
+
     const reopened = openDatabase(seededPath);
     const row = reopened
       .prepare(`SELECT canonical_title FROM series WHERE slug = 'compact-test'`)

@@ -1,10 +1,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip } from 'node:zlib';
 
 const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'ascii');
+
+function hasPopulatedSeries(filePath: string): boolean {
+  if (!fs.existsSync(filePath)) return false;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(filePath, { readOnly: true });
+    const row = db.prepare('SELECT COUNT(*) AS c FROM series').get() as { c: number } | undefined;
+    return (row?.c ?? 0) > 0;
+  } catch {
+    return false;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 function isValidSqliteFile(filePath: string): boolean {
   let fd: number | null = null;
@@ -23,11 +42,11 @@ function isValidSqliteFile(filePath: string): boolean {
 }
 
 /**
- * On fresh volume boot (when DB_PATH does not exist yet), optionally stream a
- * compacted `.db` or `.db.gz` seed file from `SEED_DB_URL` (https:// only).
+ * On fresh or empty volume boot (when DB_PATH is missing or has 0 series rows),
+ * optionally stream a compacted `.db` or `.db.gz` seed file from `SEED_DB_URL`.
  */
 export async function ensureSeedDatabase(targetPath: string, seedUrl = process.env.SEED_DB_URL): Promise<boolean> {
-  if (!seedUrl || targetPath === ':memory:' || fs.existsSync(targetPath)) {
+  if (!seedUrl || targetPath === ':memory:' || hasPopulatedSeries(targetPath)) {
     return false;
   }
 
@@ -70,6 +89,9 @@ export async function ensureSeedDatabase(targetPath: string, seedUrl = process.e
       throw new Error('Downloaded SEED_DB_URL payload is not a valid SQLite 3 database');
     }
 
+    // Clear stale WAL/SHM sidecars if replacing an empty pre-initialized DB
+    fs.rmSync(`${targetPath}-wal`, { force: true });
+    fs.rmSync(`${targetPath}-shm`, { force: true });
     fs.renameSync(tmpPath, targetPath);
     const sizeMb = (fs.statSync(targetPath).size / (1024 * 1024)).toFixed(1);
     console.log(`Seeded database ready at ${targetPath} (${sizeMb} MB).`);
