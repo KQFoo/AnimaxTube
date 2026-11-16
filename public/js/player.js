@@ -42,8 +42,20 @@
         rel: 0,
         modestbranding: 1,
         playsinline: 1,
+        fs: 1,
       },
       events: {
+        onReady: (event) => {
+          try {
+            const iframe = event.target?.getIframe?.();
+            if (iframe) {
+              iframe.setAttribute('allowfullscreen', '');
+              iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+            }
+          } catch {
+            /* ignore */
+          }
+        },
         onStateChange: (event) => {
           if (event.data === YT.PlayerState.ENDED && typeof onEndedCallback === 'function') {
             onEndedCallback();
