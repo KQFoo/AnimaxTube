@@ -95,6 +95,15 @@ export function buildPageMeta(db: DatabaseSync, pathname: string): PageMeta {
       ogType: 'website',
     };
   }
+  if (pathname === '/calendar') {
+    return {
+      title: `YouTube Anime Release Calendar & Schedule | ${SITE_NAME}`,
+      description:
+        'Weekly release schedule, live countdowns, and recent episode drops across official licensed anime YouTube channels in your local timezone.',
+      canonicalPath: '/calendar',
+      ogType: 'website',
+    };
+  }
   return {
     title: DEFAULT_TITLE,
     description: DEFAULT_DESCRIPTION,

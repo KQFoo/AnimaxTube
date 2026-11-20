@@ -18,6 +18,7 @@ import {
   querySeriesList,
   queryTopTags,
 } from './db/index.ts';
+import { queryCalendar } from './db/calendar.ts';
 import { ensureSeedDatabase } from './db/seed.ts';
 import { queryCommentRecommendations, queryForYou, queryTrending, queryUnlockedSeries } from './db/recommend.ts';
 import { registerAdminRoutes, type AdminRoutesOptions } from './admin.ts';
@@ -169,6 +170,26 @@ export function createApp(dbPath?: string, opts: AppOptions = {}) {
   app.get('/api/live', (c) => {
     const region = c.req.query('region') || null;
     return c.json({ streams: queryLiveStreams(db, region) });
+  });
+
+  app.get('/api/calendar', (c) => {
+    const region = c.req.query('region') || null;
+    const lang = c.req.query('lang') || 'all';
+    const channelRaw = c.req.query('channel');
+    const channelId = channelRaw ? parseInt(channelRaw, 10) || undefined : undefined;
+    const startRaw = c.req.query('start');
+    const endRaw = c.req.query('end');
+    const startSec = startRaw ? parseInt(startRaw, 10) : undefined;
+    const endSec = endRaw ? parseInt(endRaw, 10) : undefined;
+    return c.json(
+      queryCalendar(db, {
+        region,
+        lang,
+        channelId,
+        startSec: Number.isFinite(startSec) ? startSec : undefined,
+        endSec: Number.isFinite(endSec) ? endSec : undefined,
+      })
+    );
   });
 
   app.get('/api/unlocked', (c) => {

@@ -32,6 +32,7 @@
   const SITE_TITLE = 'AnimaxTube';
   const VIEW_TITLES = {
     channels: 'Official Licensed Anime Channels on YouTube | AnimaxTube',
+    calendar: 'YouTube Anime Release Calendar & Schedule | AnimaxTube',
     watchlist: 'Watchlist | AnimaxTube',
     history: 'Watch History | AnimaxTube',
     about: 'About, Legal & DMCA | AnimaxTube',
@@ -111,6 +112,19 @@
     forYouRows: [],
     showCommentQuotes: true,
     watch: null, // { detail, activeSourceId, activeEpisodeIndex } | { liveStream }
+    calendar: {
+      weekOffset: 0,
+      selectedDayKey: null,
+      channelId: '',
+      lang: 'all',
+      watchlistOnly: false,
+      collapsedDays: {},
+      expandedLists: {},
+      layout: 'week',
+      items: [],
+      loading: false,
+      loadedKey: '',
+    },
     saved: loadJson(STORAGE_SAVED, {}),
     history: loadJson(STORAGE_HISTORY, {}),
   };
@@ -163,12 +177,25 @@
     clearHistoryBtn: document.getElementById('clearHistoryBtn'),
     views: {
       series: document.getElementById('seriesView'),
+      calendar: document.getElementById('calendarView'),
       channels: document.getElementById('channelsView'),
       watchlist: document.getElementById('watchlistView'),
       history: document.getElementById('historyView'),
       watch: document.getElementById('watchView'),
       about: document.getElementById('aboutView'),
     },
+    calendarTimezoneBadge: document.getElementById('calendarTimezoneBadge'),
+    calPrevWeekBtn: document.getElementById('calPrevWeekBtn'),
+    calTodayBtn: document.getElementById('calTodayBtn'),
+    calNextWeekBtn: document.getElementById('calNextWeekBtn'),
+    calWeekRangeLabel: document.getElementById('calWeekRangeLabel'),
+    calChannelSelect: document.getElementById('calChannelSelect'),
+    calLangGroup: document.getElementById('calLangGroup'),
+    calWatchlistBtn: document.getElementById('calWatchlistBtn'),
+    calToggleSectionsBtn: document.getElementById('calToggleSectionsBtn'),
+    calLayoutGroup: document.getElementById('calLayoutGroup'),
+    calDayTabs: document.getElementById('calDayTabs'),
+    calendarGrid: document.getElementById('calendarGrid'),
     playerFrame: document.getElementById('playerFrame'),
     geoLockCard: document.getElementById('geoLockCard'),
     licensorBanner: document.getElementById('licensorBanner'),
@@ -432,6 +459,13 @@
     if (view === 'watchlist') renderWatchlist();
     if (view === 'history') renderHistory();
     if (view === 'channels') renderChannelsGrid();
+    if (view === 'calendar') {
+      renderCalendarChannelOptions();
+      loadCalendar();
+      startCalendarCountdownTicker();
+    } else {
+      stopCalendarCountdownTicker();
+    }
     if (view === 'about') renderLegalChannels();
     if (view === 'series') {
       requestAnimationFrame(updateChipScrollButtons);
@@ -442,7 +476,14 @@
     }
   }
 
-  const VIEW_PATHS = { series: '/', channels: '/channels', watchlist: '/watchlist', history: '/history', about: '/about' };
+  const VIEW_PATHS = {
+    series: '/',
+    calendar: '/calendar',
+    channels: '/channels',
+    watchlist: '/watchlist',
+    history: '/history',
+    about: '/about',
+  };
 
   async function loadInitialMetadata() {
     const shelfFetchLimit = String(getShelfLimit() + 4);
@@ -484,9 +525,11 @@
     }
     if (state.view === 'about') renderLegalChannels();
     renderSidebarChannels();
+    renderCalendarChannelOptions();
     renderDynamicTags();
     renderHomeShelves();
     if (state.view === 'channels') renderChannelsGrid();
+    if (state.view === 'calendar') loadCalendar(true);
   }
 
   function renderSidebarChannels() {
@@ -831,6 +874,401 @@
       .join('');
   }
 
+  let calendarCountdownTimer = null;
+  let calendarAbortCtrl = null;
+  const calendarItemsById = new Map();
+
+  function getLocalDayKey(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function getUserTimeZoneLabel() {
+    const tzName = (() => {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      } catch {
+        return '';
+      }
+    })();
+    const offsetMin = -new Date().getTimezoneOffset();
+    const sign = offsetMin >= 0 ? '+' : '-';
+    const abs = Math.abs(offsetMin);
+    const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+    const mm = String(abs % 60).padStart(2, '0');
+    const utcStr = `UTC${sign}${hh}:${mm}`;
+    return tzName ? `${tzName} (${utcStr})` : utcStr;
+  }
+
+  function getLocalWeekInfo(weekOffset) {
+    const now = new Date();
+    const todayKey = getLocalDayKey(now);
+    const mondayOffset = (now.getDay() + 6) % 7; // Mon=0..Sun=6
+    const startDate = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - mondayOffset + weekOffset * 7,
+      0,
+      0,
+      0,
+      0
+    );
+    const endDate = new Date(
+      startDate.getFullYear(),
+      startDate.getMonth(),
+      startDate.getDate() + 7,
+      0,
+      0,
+      0,
+      0
+    );
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + i, 0, 0, 0, 0);
+      days.push({
+        key: getLocalDayKey(d),
+        date: d,
+        isToday: getLocalDayKey(d) === todayKey,
+        weekdayShort: d.toLocaleDateString(undefined, { weekday: 'short' }),
+        weekdayLong: d.toLocaleDateString(undefined, { weekday: 'long' }),
+        dateShort: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      });
+    }
+    return {
+      todayKey,
+      days,
+      startSec: Math.floor(startDate.getTime() / 1000),
+      endSec: Math.floor(endDate.getTime() / 1000),
+      rangeLabel: `${days[0].dateShort} – ${days[6].dateShort}, ${days[6].date.getFullYear()}`,
+    };
+  }
+
+  function formatLocalClockTime(unixSec) {
+    return new Date(unixSec * 1000).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  function formatCalendarCountdown(unixSec, status) {
+    if (status === 'live') return 'LIVE NOW';
+    const nowSec = Math.floor(Date.now() / 1000);
+    const diff = unixSec - nowSec;
+    if (status === 'released') return 'Watch now';
+    if (diff <= 0) return diff > -900 ? 'Dropping now' : 'Expected soon';
+    if (diff < 3600) return `in ${Math.max(1, Math.ceil(diff / 60))}m`;
+    if (diff < 86400) {
+      const h = Math.floor(diff / 3600);
+      const m = Math.floor((diff % 3600) / 60);
+      return m > 0 ? `in ${h}h ${m}m` : `in ${h}h`;
+    }
+    const d = Math.floor(diff / 86400);
+    const h = Math.floor((diff % 86400) / 3600);
+    return h > 0 ? `in ${d}d ${h}h` : `in ${d}d`;
+  }
+
+  function isCalendarSectionCollapsed(dayKey, itemCount) {
+    const override = state.calendar.collapsedDays[dayKey];
+    if (typeof override === 'boolean') return override;
+    return itemCount === 0;
+  }
+
+  function toggleCalendarSection(dayKey, itemCount) {
+    if (!dayKey) return;
+    state.calendar.collapsedDays[dayKey] = !isCalendarSectionCollapsed(dayKey, itemCount);
+    renderCalendarView();
+  }
+
+  function syncCalendarToggleSectionsButton(daysToRender, byDay) {
+    if (!el.calToggleSectionsBtn) return;
+    const allCollapsed =
+      daysToRender.length > 0 &&
+      daysToRender.every((d) => isCalendarSectionCollapsed(d.key, (byDay.get(d.key) || []).length));
+    const label = allCollapsed ? 'Show all day sections' : 'Hide all day sections';
+    el.calToggleSectionsBtn.classList.toggle('active', allCollapsed);
+    el.calToggleSectionsBtn.setAttribute('aria-pressed', allCollapsed ? 'true' : 'false');
+    el.calToggleSectionsBtn.setAttribute('aria-label', label);
+    el.calToggleSectionsBtn.title = label;
+  }
+
+  function startCalendarCountdownTicker() {
+    if (calendarCountdownTimer) return;
+    calendarCountdownTimer = setInterval(() => {
+      if (state.view !== 'calendar' || !el.calendarGrid) return;
+      el.calendarGrid.querySelectorAll('[data-countdown-ts]').forEach((node) => {
+        const ts = parseInt(node.dataset.countdownTs, 10);
+        const status = node.dataset.countdownStatus || 'upcoming';
+        if (Number.isFinite(ts)) {
+          node.textContent = formatCalendarCountdown(ts, status);
+        }
+      });
+    }, 30_000);
+  }
+
+  function stopCalendarCountdownTicker() {
+    if (calendarCountdownTimer) {
+      clearInterval(calendarCountdownTimer);
+      calendarCountdownTimer = null;
+    }
+  }
+
+  function renderCalendarChannelOptions() {
+    if (!el.calChannelSelect) return;
+    const current = state.calendar.channelId || '';
+    const available = state.channels.filter((c) => c.seriesCount > 0);
+    el.calChannelSelect.innerHTML = [
+      '<option value="">All YT Channels</option>',
+      ...available.map(
+        (c) => `<option value="${c.id}"${String(c.id) === String(current) ? ' selected' : ''}>${escapeHtml(c.name)}</option>`
+      ),
+    ].join('');
+  }
+
+  async function loadCalendar(force = false) {
+    if (!el.calendarGrid) return;
+    const week = getLocalWeekInfo(state.calendar.weekOffset);
+    const queryKey = [
+      state.region,
+      week.startSec,
+      week.endSec,
+      state.calendar.channelId,
+      state.calendar.lang,
+    ].join('|');
+
+    if (el.calendarTimezoneBadge) {
+      el.calendarTimezoneBadge.textContent = getUserTimeZoneLabel();
+    }
+    if (el.calWeekRangeLabel) {
+      el.calWeekRangeLabel.textContent = week.rangeLabel;
+    }
+
+    if (!force && state.calendar.loadedKey === queryKey && !state.calendar.loading) {
+      renderCalendarView();
+      return;
+    }
+
+    if (calendarAbortCtrl) calendarAbortCtrl.abort();
+    calendarAbortCtrl = new AbortController();
+    const ctrl = calendarAbortCtrl;
+    state.calendar.loading = true;
+    el.calendarGrid.innerHTML = `<div class="empty-state">Loading YouTube release schedule…</div>`;
+
+    const params = {
+      start: String(week.startSec),
+      end: String(week.endSec),
+      lang: state.calendar.lang,
+    };
+    if (state.calendar.channelId) params.channel = String(state.calendar.channelId);
+
+    try {
+      const data = await fetchJson(apiUrl('/api/calendar', params), { signal: ctrl.signal });
+      state.calendar.items = data.items || [];
+      state.calendar.loadedKey = queryKey;
+      renderCalendarView();
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      el.calendarGrid.innerHTML = `<div class="empty-state">Failed to load calendar schedule.</div>`;
+    } finally {
+      if (calendarAbortCtrl === ctrl) {
+        state.calendar.loading = false;
+      }
+    }
+  }
+
+  function renderCalendarCard(item) {
+    calendarItemsById.set(item.id, item);
+    if (item.seriesSlug) {
+      registerSeriesItem({
+        slug: item.seriesSlug,
+        canonicalTitle: item.seriesTitle,
+        posterUrl: item.posterUrl || item.thumbnailUrl,
+        episodeCount: item.episodeNumber || 1,
+        totalViews: 0,
+        latestUploadedAt: item.airingAt,
+        tags: [],
+        subLanguages: [item.subLanguage],
+        channels: [
+          {
+            channelId: item.channelId,
+            channelName: item.channelName,
+            channelAvatar: item.channelAvatar,
+            subLanguage: item.subLanguage,
+          },
+        ],
+      });
+    }
+
+    const langBadge = formatLangBadge(item.subLanguage);
+    const thumbSrc = safeUrl(optimizeThumbUrl(item.thumbnailUrl || item.posterUrl));
+    const avatarSrc = safeUrl(item.channelAvatar);
+    const isSaved = item.seriesSlug ? Boolean(state.saved[item.seriesSlug]) : false;
+    const epBadge =
+      item.batchCount > 1
+        ? item.episodeNumber !== null && item.episodeNumberEnd != null
+          ? `EP ${item.episodeNumber}–${item.episodeNumberEnd}`
+          : `${item.batchCount} EPs`
+        : item.episodeNumber !== null
+          ? `EP ${item.episodeNumber}`
+          : item.kind === 'premiere'
+            ? item.status === 'live'
+              ? 'LIVE'
+              : 'Premiere'
+            : 'New EP';
+
+    let statusPill = '';
+    if (item.status === 'live') {
+      statusPill = `<span class="cal-status-pill live">● LIVE</span>`;
+    } else if (item.status === 'released') {
+      statusPill = `<span class="cal-status-pill released">Watch</span>`;
+    } else if (item.confidence === 'exact') {
+      statusPill = `<span class="cal-status-pill exact">Premiere</span>`;
+    } else {
+      statusPill = `<span class="cal-status-pill estimated" title="Predicted from channel's weekly YouTube upload schedule">~Weekly</span>`;
+    }
+
+    const countdownText = formatCalendarCountdown(item.airingAt, item.status);
+    const localTimeText = formatLocalClockTime(item.airingAt);
+
+    return `
+      <article class="cal-card ${escapeHtml(item.status)}" data-cal-id="${escapeHtml(item.id)}">
+        <div class="cal-card-top">
+          <div class="cal-time-wrap">
+            <span class="cal-time">${escapeHtml(localTimeText)}</span>
+            <span class="cal-countdown ${escapeHtml(item.status)}" data-countdown-ts="${item.airingAt}" data-countdown-status="${escapeHtml(item.status)}">${escapeHtml(countdownText)}</span>
+          </div>
+          ${statusPill}
+        </div>
+        <div class="cal-card-body">
+          <div class="cal-thumb">
+            ${thumbSrc ? `<img src="${escapeHtml(thumbSrc)}" alt="${escapeHtml(item.seriesTitle)}" loading="lazy" decoding="async" />` : ''}
+            <span class="cal-ep-badge">${escapeHtml(epBadge)}</span>
+          </div>
+          <div class="cal-info">
+            <h3 class="cal-series-title">${escapeHtml(item.seriesTitle)}</h3>
+            ${item.episodeTitle && item.episodeTitle !== item.seriesTitle ? `<div class="cal-ep-title">${escapeHtml(item.episodeTitle)}</div>` : ''}
+            <div class="cal-channel-row">
+              ${avatarSrc ? `<img class="cal-ch-avatar" src="${escapeHtml(avatarSrc)}" alt="" loading="lazy" />` : ''}
+              <span class="cal-ch-name">${escapeHtml(item.channelName)}</span>
+              <span class="lang-tag ${langBadge.cls}">${escapeHtml(langBadge.label)}</span>
+            </div>
+          </div>
+        </div>
+        ${
+          item.seriesSlug
+            ? `<div class="cal-card-actions">
+                 <button type="button" class="cal-action-btn cal-watchlist-btn${isSaved ? ' saved' : ''}" data-watchlist-toggle="${escapeHtml(item.seriesSlug)}" aria-pressed="${isSaved ? 'true' : 'false'}" aria-label="${isSaved ? 'Remove from Watchlist' : 'Add to Watchlist'}" title="${isSaved ? 'In Watchlist' : 'Add to Watchlist'}">${isSaved ? BOOKMARK_FILLED_ICON : BOOKMARK_OUTLINE_ICON}</button>
+               </div>`
+            : ''
+        }
+      </article>
+    `;
+  }
+
+  function renderCalendarView() {
+    if (!el.calendarGrid || !el.calDayTabs) return;
+    const week = getLocalWeekInfo(state.calendar.weekOffset);
+    const filteredItems = state.calendar.items.filter((it) => {
+      if (state.calendar.watchlistOnly) {
+        return Boolean(it.seriesSlug && state.saved[it.seriesSlug]);
+      }
+      return true;
+    });
+
+    const byDay = new Map(week.days.map((d) => [d.key, []]));
+    for (const item of filteredItems) {
+      const key = getLocalDayKey(new Date(item.airingAt * 1000));
+      const bucket = byDay.get(key);
+      if (bucket) bucket.push(item);
+    }
+
+    if (!state.calendar.selectedDayKey || !byDay.has(state.calendar.selectedDayKey)) {
+      const todayEntry = week.days.find((d) => d.isToday);
+      state.calendar.selectedDayKey = todayEntry ? todayEntry.key : week.days[0].key;
+    }
+
+    const useSingleDayMode = state.calendar.layout === 'day' || window.innerWidth < 960;
+    el.calendarGrid.classList.toggle('is-day-mode', useSingleDayMode);
+    el.calDayTabs.classList.toggle('force-show', useSingleDayMode);
+
+    el.calDayTabs.innerHTML = week.days
+      .map((d) => {
+        const count = byDay.get(d.key)?.length || 0;
+        const active = d.key === state.calendar.selectedDayKey ? ' active' : '';
+        const todayCls = d.isToday ? ' today' : '';
+        return `
+          <button type="button" role="tab" class="cal-day-tab${active}${todayCls}" data-cal-day="${d.key}" aria-selected="${d.key === state.calendar.selectedDayKey ? 'true' : 'false'}">
+            <span class="cal-day-tab-wk">${escapeHtml(d.weekdayShort)}</span>
+            <span class="cal-day-tab-dt">${escapeHtml(d.dateShort)}</span>
+            <span class="cal-day-tab-cnt">${count}</span>
+          </button>
+        `;
+      })
+      .join('');
+
+    const daysToRender = useSingleDayMode
+      ? week.days.filter((d) => d.key === state.calendar.selectedDayKey)
+      : week.days;
+    syncCalendarToggleSectionsButton(daysToRender, byDay);
+
+    requestAnimationFrame(() => {
+      const activeTab = el.calDayTabs.querySelector('.cal-day-tab.active');
+      if (activeTab && el.calDayTabs.scrollWidth > el.calDayTabs.clientWidth) {
+        el.calDayTabs.scrollLeft = activeTab.offsetLeft - (el.calDayTabs.clientWidth - activeTab.offsetWidth) / 2;
+      }
+    });
+
+    if (filteredItems.length === 0 && state.calendar.watchlistOnly) {
+      el.calendarGrid.innerHTML = `<div class="empty-state">No scheduled or recent drops this week for your Watchlist.</div>`;
+      return;
+    }
+
+    const perDayCap = useSingleDayMode ? 24 : 6;
+
+    el.calendarGrid.innerHTML = daysToRender
+      .map((d) => {
+        const dayItems = byDay.get(d.key) || [];
+        const isCollapsed = isCalendarSectionCollapsed(d.key, dayItems.length);
+        const isListExpanded = Boolean(state.calendar.expandedLists[d.key]);
+        const hasOverflow = !state.calendar.watchlistOnly && dayItems.length > perDayCap;
+        const visibleItems = hasOverflow && !isListExpanded ? dayItems.slice(0, perDayCap) : dayItems;
+        const remainingCount = dayItems.length - visibleItems.length;
+        return `
+          <section class="cal-day-col${d.isToday ? ' today' : ''}${isCollapsed ? ' collapsed' : ''}">
+            <header class="cal-day-col-header">
+              <button type="button" class="cal-day-toggle-btn" data-cal-section-toggle="${d.key}" data-cal-section-count="${dayItems.length}" aria-expanded="${isCollapsed ? 'false' : 'true'}" aria-label="${isCollapsed ? 'Show day section' : 'Hide day section'}" title="${isCollapsed ? 'Show section' : 'Hide section'}">
+                <div class="cal-day-col-titles">
+                  <span class="cal-day-col-wk">${escapeHtml(d.weekdayLong)}</span>
+                  <span class="cal-day-col-dt">${escapeHtml(d.dateShort)}</span>
+                </div>
+                <div class="cal-day-col-meta">
+                  ${d.isToday ? '<span class="cal-today-pill">Today</span>' : ''}
+                  <span class="cal-count-pill">${dayItems.length}</span>
+                  <svg class="cal-section-chevron" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+                </div>
+              </button>
+            </header>
+            <div class="cal-day-list" ${isCollapsed ? 'hidden' : ''}>
+              ${
+                visibleItems.length > 0
+                  ? visibleItems.map(renderCalendarCard).join('')
+                  : '<div class="cal-day-empty">No scheduled drops</div>'
+              }
+              ${
+                hasOverflow
+                  ? `<button type="button" class="cal-show-more-btn" data-cal-expand-list="${d.key}">${
+                      isListExpanded ? 'Show less' : `Show ${remainingCount} more`
+                    }</button>`
+                  : ''
+              }
+            </div>
+          </section>
+        `;
+      })
+      .join('');
+  }
+
   function renderWatchlist() {
     const savedList = Object.values(state.saved);
     el.savedGrid.innerHTML =
@@ -863,6 +1301,14 @@
     if (state.watch?.detail?.series?.slug === slug && el.saveSeriesBtn) {
       el.saveSeriesBtn.textContent = isSaved ? '✓ In Watchlist' : '+ Watchlist';
     }
+    document.querySelectorAll('.cal-watchlist-btn').forEach((btn) => {
+      if (btn.dataset.watchlistToggle !== slug) return;
+      btn.classList.toggle('saved', isSaved);
+      btn.setAttribute('aria-pressed', isSaved ? 'true' : 'false');
+      btn.setAttribute('aria-label', isSaved ? 'Remove from Watchlist' : 'Add to Watchlist');
+      btn.title = isSaved ? 'In Watchlist' : 'Add to Watchlist';
+      btn.innerHTML = isSaved ? BOOKMARK_FILLED_ICON : BOOKMARK_OUTLINE_ICON;
+    });
   }
 
   function toggleWatchlistBySlug(slug) {
@@ -1415,7 +1861,10 @@
 
   function applyRouteFromUrl(pathname) {
     if (pathname.startsWith('/watch/')) {
-      openSeriesWatch(decodeURIComponent(pathname.slice('/watch/'.length)));
+      const preferredVideoId = new URLSearchParams(window.location.search).get('v') || undefined;
+      openSeriesWatch(decodeURIComponent(pathname.slice('/watch/'.length)), preferredVideoId);
+    } else if (pathname === '/calendar') {
+      switchView('calendar');
     } else if (pathname === '/channels') {
       switchView('channels');
     } else if (pathname === '/watchlist') {
@@ -1499,6 +1948,9 @@
         el.topbar.classList.remove('search-open');
       }
       updateChipScrollButtons();
+      if (state.view === 'calendar') {
+        renderCalendarView();
+      }
     });
 
     el.brandHomeLink.addEventListener('click', (e) => {
@@ -1628,6 +2080,135 @@
       renderSidebarChannels();
       loadSeries(false);
     });
+
+    if (el.calPrevWeekBtn) {
+      el.calPrevWeekBtn.addEventListener('click', () => {
+        state.calendar.weekOffset -= 1;
+        state.calendar.selectedDayKey = null;
+        loadCalendar();
+      });
+    }
+    if (el.calTodayBtn) {
+      el.calTodayBtn.addEventListener('click', () => {
+        state.calendar.weekOffset = 0;
+        state.calendar.selectedDayKey = null;
+        loadCalendar();
+      });
+    }
+    if (el.calNextWeekBtn) {
+      el.calNextWeekBtn.addEventListener('click', () => {
+        state.calendar.weekOffset += 1;
+        state.calendar.selectedDayKey = null;
+        loadCalendar();
+      });
+    }
+    if (el.calChannelSelect) {
+      el.calChannelSelect.addEventListener('change', () => {
+        state.calendar.channelId = el.calChannelSelect.value;
+        loadCalendar();
+      });
+    }
+    if (el.calLangGroup) {
+      el.calLangGroup.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-cal-lang]');
+        if (!btn) return;
+        state.calendar.lang = btn.dataset.calLang;
+        el.calLangGroup.querySelectorAll('[data-cal-lang]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
+        loadCalendar();
+      });
+    }
+    if (el.calWatchlistBtn) {
+      el.calWatchlistBtn.addEventListener('click', () => {
+        state.calendar.watchlistOnly = !state.calendar.watchlistOnly;
+        el.calWatchlistBtn.classList.toggle('active', state.calendar.watchlistOnly);
+        el.calWatchlistBtn.setAttribute('aria-pressed', state.calendar.watchlistOnly ? 'true' : 'false');
+        renderCalendarView();
+      });
+    }
+    if (el.calToggleSectionsBtn) {
+      el.calToggleSectionsBtn.addEventListener('click', () => {
+        const week = getLocalWeekInfo(state.calendar.weekOffset);
+        const filteredItems = state.calendar.items.filter((it) =>
+          state.calendar.watchlistOnly ? Boolean(it.seriesSlug && state.saved[it.seriesSlug]) : true
+        );
+        const countsByDay = new Map(week.days.map((d) => [d.key, 0]));
+        for (const item of filteredItems) {
+          const key = getLocalDayKey(new Date(item.airingAt * 1000));
+          if (countsByDay.has(key)) countsByDay.set(key, countsByDay.get(key) + 1);
+        }
+        const useSingleDayMode = state.calendar.layout === 'day' || window.innerWidth < 960;
+        const targetDays = useSingleDayMode
+          ? week.days.filter((d) => d.key === state.calendar.selectedDayKey)
+          : week.days;
+        const allCollapsed =
+          targetDays.length > 0 &&
+          targetDays.every((d) => isCalendarSectionCollapsed(d.key, countsByDay.get(d.key) || 0));
+        for (const d of targetDays) {
+          state.calendar.collapsedDays[d.key] = !allCollapsed;
+        }
+        renderCalendarView();
+      });
+    }
+    if (el.calLayoutGroup) {
+      el.calLayoutGroup.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-cal-layout]');
+        if (!btn) return;
+        state.calendar.layout = btn.dataset.calLayout;
+        el.calLayoutGroup.querySelectorAll('[data-cal-layout]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
+        renderCalendarView();
+      });
+    }
+    if (el.calDayTabs) {
+      el.calDayTabs.addEventListener('click', (e) => {
+        const tab = e.target.closest('[data-cal-day]');
+        if (!tab) return;
+        state.calendar.selectedDayKey = tab.dataset.calDay;
+        renderCalendarView();
+      });
+    }
+    if (el.calendarGrid) {
+      el.calendarGrid.addEventListener('click', (e) => {
+        const expandListBtn = e.target.closest('[data-cal-expand-list]');
+        if (expandListBtn) {
+          e.stopPropagation();
+          const dayKey = expandListBtn.dataset.calExpandList;
+          state.calendar.expandedLists[dayKey] = !state.calendar.expandedLists[dayKey];
+          renderCalendarView();
+          return;
+        }
+        const sectionBtn = e.target.closest('[data-cal-section-toggle]');
+        if (sectionBtn) {
+          e.stopPropagation();
+          const itemCount = parseInt(sectionBtn.dataset.calSectionCount || '0', 10) || 0;
+          toggleCalendarSection(sectionBtn.dataset.calSectionToggle, itemCount);
+          return;
+        }
+        const wlBtn = e.target.closest('[data-watchlist-toggle]');
+        if (wlBtn) {
+          e.stopPropagation();
+          toggleWatchlistBySlug(wlBtn.dataset.watchlistToggle);
+          return;
+        }
+        const card = e.target.closest('.cal-card[data-cal-id]');
+        if (!card) return;
+        const item = calendarItemsById.get(card.dataset.calId);
+        if (!item) return;
+        let targetUrl = '';
+        if (item.seriesSlug) {
+          const qs = item.youtubeVideoId ? `?v=${encodeURIComponent(item.youtubeVideoId)}` : '';
+          targetUrl = `/watch/${encodeURIComponent(item.seriesSlug)}${qs}`;
+        } else if (item.youtubeVideoId) {
+          targetUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(item.youtubeVideoId)}`;
+        }
+        if (targetUrl) {
+          window.open(targetUrl, '_blank', 'noopener,noreferrer');
+        }
+      });
+    }
 
     if (el.loadMoreBtn) {
       el.loadMoreBtn.addEventListener('click', () => {

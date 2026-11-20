@@ -305,7 +305,7 @@ export function buildEpisodeGeoSql(
   };
 }
 
-function buildLiveGeoSql(
+export function buildLiveGeoSql(
   db: DatabaseSync,
   alias: string,
   region: string | null

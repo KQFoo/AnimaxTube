@@ -64,6 +64,10 @@
           <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3 3 10.5V21h6v-6h6v6h6V10.5z"/></svg>
           <span>Home</span>
         </button>
+        <button class="nav-item" data-view="calendar">
+          <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"/></svg>
+          <span>Calendar</span>
+        </button>
         <button class="nav-item" data-view="channels">
           <svg class="nav-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
           <span>Channels</span>
@@ -196,6 +200,51 @@
           <p id="channelsSubtitle">Licensed distributors publishing English- and Chinese-subtitled anime &amp; donghua on their own official YouTube channels (geo-filtered; channels licensed for other regions show 0).</p>
         </div>
         <div id="channelsGrid" class="channels-grid"></div>
+      </section>
+
+      <!-- CALENDAR VIEW -->
+      <section id="calendarView" class="view" hidden>
+        <div class="view-header view-header-row cal-header-top">
+          <div>
+            <h1>YouTube Release Calendar</h1>
+            <p>Weekly schedule, upcoming premieres, and recent drops across official YouTube channels.</p>
+          </div>
+          <span id="calendarTimezoneBadge" class="cal-tz-pill" title="Detected local browser timezone">Local Time</span>
+        </div>
+
+        <div class="cal-toolbar">
+          <div class="cal-week-nav">
+            <button id="calPrevWeekBtn" type="button" class="btn-secondary cal-nav-btn" aria-label="Previous week">‹ Prev</button>
+            <button id="calTodayBtn" type="button" class="btn-secondary cal-nav-btn">This Week</button>
+            <button id="calNextWeekBtn" type="button" class="btn-secondary cal-nav-btn" aria-label="Next week">Next ›</button>
+            <span id="calWeekRangeLabel" class="cal-week-label"></span>
+          </div>
+
+          <div class="cal-filters">
+            <select id="calChannelSelect" class="sort-select cal-channel-select" aria-label="Filter by YouTube channel">
+              <option value="">All YT Channels</option>
+            </select>
+            <div id="calLangGroup" class="cal-seg-group" role="group" aria-label="Filter by language">
+              <button type="button" class="cal-seg-btn active" data-cal-lang="all">All</button>
+              <button type="button" class="cal-seg-btn" data-cal-lang="en">EN</button>
+              <button type="button" class="cal-seg-btn" data-cal-lang="zh">中文</button>
+            </div>
+            <button id="calWatchlistBtn" type="button" class="cal-toggle-pill" aria-pressed="false">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M17 3H7a2 2 0 0 0-2 2v16l7-3 7 3V5a2 2 0 0 0-2-2z"/></svg>
+              <span>Watchlist</span>
+            </button>
+            <button id="calToggleSectionsBtn" type="button" class="cal-toggle-pill cal-toggle-icon-btn" aria-pressed="false" aria-label="Hide all day sections" title="Hide all day sections">
+              <svg class="cal-section-chevron" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+            </button>
+            <div id="calLayoutGroup" class="cal-seg-group cal-layout-group" role="group" aria-label="Calendar layout">
+              <button type="button" class="cal-seg-btn active" data-cal-layout="week">Week</button>
+              <button type="button" class="cal-seg-btn" data-cal-layout="day">Day</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="calDayTabs" class="cal-day-tabs" role="tablist" aria-label="Days of week"></div>
+        <div id="calendarGrid" class="cal-week-grid"></div>
       </section>
 
       <!-- WATCHLIST VIEW -->
@@ -399,6 +448,10 @@
     <button class="mobile-nav-item active" data-view="series">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 3 3 10.5V21h6v-6h6v6h6V10.5z"/></svg>
       <span>Home</span>
+    </button>
+    <button class="mobile-nav-item" data-view="calendar">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm0-12H5V6h14v2z"/></svg>
+      <span>Calendar</span>
     </button>
     <button class="mobile-nav-item" data-view="channels">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M21 6h-7.59l3.29-3.29L16 2l-4 4-4-4-.71.71L10.59 6H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm0 14H3V8h18v12zM9 10v8l7-4z"/></svg>
