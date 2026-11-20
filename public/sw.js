@@ -1,4 +1,4 @@
-const CACHE_NAME = 'animaxtube-shell-v10';
+const CACHE_NAME = 'animaxtube-shell-v11';
 const SHELL_ASSETS = ['/', '/index.html', '/css/app.css', '/js/theme-init.js', '/js/app.js', '/js/player.js', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
