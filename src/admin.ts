@@ -296,7 +296,7 @@ const ADMIN_HTML = `<!doctype html>
 
     /* Buttons & Inputs */
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    button {
+    button, .btn-link {
       background: var(--surface-2);
       color: var(--text);
       border: 1px solid var(--border);
@@ -309,16 +309,17 @@ const ADMIN_HTML = `<!doctype html>
       display: inline-flex;
       align-items: center;
       gap: 6px;
+      text-decoration: none;
     }
-    button:hover:not(:disabled) { border-color: var(--accent); background: #1f2a3f; }
-    button:active:not(:disabled) { transform: translateY(1px); }
+    button:hover:not(:disabled), .btn-link:hover { border-color: var(--accent); background: #1f2a3f; text-decoration: none; }
+    button:active:not(:disabled), .btn-link:active { transform: translateY(1px); }
     button.primary { background: var(--accent); color: #06101c; border-color: var(--accent); font-weight: 600; }
     button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
     button.danger { background: transparent; border-color: rgba(255, 107, 107, 0.35); color: var(--bad); }
     button.danger:hover:not(:disabled) { background: var(--bad-bg); border-color: var(--bad); }
     button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
     button.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); border-color: var(--border); }
-    button.sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+    button.sm, .btn-link.sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
 
     input, select {
@@ -534,6 +535,7 @@ const ADMIN_HTML = `<!doctype html>
         <span id="liveJobPill" class="live-pill"><span class="dot"></span><span id="liveJobText">Loading...</span></span>
       </div>
       <div class="toolbar">
+        <a href="/" target="_blank" rel="noopener noreferrer" class="btn-link sm">Open Homepage ↗</a>
         <button id="btnRefresh" class="sm">Refresh</button>
         <button id="btnLogout" class="sm danger">Sign Out</button>
       </div>
