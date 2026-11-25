@@ -396,6 +396,7 @@
     total: 0,
     isLoadingSeries: false,
     seriesItems: [],
+    searchVideoItems: [],
     channels: [],
     topTags: [],
     liveStreams: [],
@@ -474,6 +475,9 @@
     recsShelfGrid: document.getElementById('recsShelfGrid'),
     toggleCommentsCheckbox: document.getElementById('toggleCommentsCheckbox'),
     seriesCountLine: document.getElementById('seriesCountLine'),
+    searchVideosShelf: document.getElementById('searchVideosShelf'),
+    searchVideosCount: document.getElementById('searchVideosCount'),
+    searchVideosGrid: document.getElementById('searchVideosGrid'),
     seriesGrid: document.getElementById('seriesGrid'),
     seriesPagination: document.getElementById('seriesPagination'),
     loadMoreSentinel: document.getElementById('loadMoreSentinel'),
@@ -1045,6 +1049,9 @@
         renderHomeShelves();
       }
       renderSeriesGrid();
+      if (!append) {
+        loadSearchVideos();
+      }
     } catch (err) {
       if (err && err.name === 'AbortError') return;
       throw err;
@@ -1054,6 +1061,110 @@
         el.seriesGrid.classList.remove('is-loading');
       }
     }
+  }
+
+  let searchVideosAbortCtrl = null;
+
+  async function loadSearchVideos() {
+    if (!el.searchVideosShelf || !el.searchVideosGrid) return;
+    if (searchVideosAbortCtrl) {
+      searchVideosAbortCtrl.abort();
+      searchVideosAbortCtrl = null;
+    }
+    const q = (state.q || '').trim();
+    if (!q) {
+      state.searchVideoItems = [];
+      el.searchVideosShelf.hidden = true;
+      el.searchVideosGrid.innerHTML = '';
+      return;
+    }
+
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    searchVideosAbortCtrl = ctrl;
+    try {
+      const params = { q, limit: '12' };
+      if (state.channelId) params.channel = String(state.channelId);
+      const data = await fetchJson(apiUrl('/api/videos', params), ctrl ? { signal: ctrl.signal } : undefined);
+      state.searchVideoItems = data.items || [];
+      renderSearchVideos();
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      state.searchVideoItems = [];
+      el.searchVideosShelf.hidden = true;
+    }
+  }
+
+  function renderSearchVideos() {
+    if (!el.searchVideosShelf || !el.searchVideosGrid) return;
+    const items = state.searchVideoItems;
+    if (!state.q || items.length === 0) {
+      el.searchVideosShelf.hidden = true;
+      el.searchVideosGrid.innerHTML = '';
+      return;
+    }
+    el.searchVideosShelf.hidden = false;
+    if (el.searchVideosCount) {
+      el.searchVideosCount.textContent = `${items.length} video${items.length === 1 ? '' : 's'}`;
+    }
+    el.searchVideosGrid.innerHTML = items
+      .map((v, idx) => {
+        const thumb =
+          safeUrl(optimizeThumbUrl(v.thumbnailUrl)) ||
+          `https://i.ytimg.com/vi/${encodeURIComponent(v.youtubeVideoId)}/mqdefault.jpg`;
+        const avatar = safeUrl(v.channelAvatar);
+        const dur = formatDuration(v.durationIso);
+        const badgeCls = v.kind === 'song' ? (v.songType || 'ost') : '';
+        const badgeText =
+          v.kind === 'song'
+            ? formatSongTypeLabel(v.songType)
+            : v.episodeNumber !== null && v.episodeNumber !== undefined
+              ? `EP ${v.episodeNumber}`
+              : 'VIDEO';
+        const stats = [formatViews(v.viewCount), formatRelativeDate(v.publishedAt)].filter(Boolean).join(' · ');
+        return `
+          <article class="song-card" data-search-video-index="${idx}" tabindex="0" role="button">
+            <div class="song-thumb-wrap">
+              <img src="${escapeHtml(thumb)}" alt="" loading="lazy" decoding="async" />
+              <span class="song-type-badge ${escapeHtml(badgeCls)}">${escapeHtml(badgeText)}</span>
+              ${dur ? `<span class="song-dur">${escapeHtml(dur)}</span>` : ''}
+              ${PLAY_OVERLAY}
+            </div>
+            <div class="song-body">
+              ${avatar ? `<img class="song-ch-avatar" src="${escapeHtml(avatar)}" alt="" loading="lazy" />` : ''}
+              <div class="song-info">
+                <div class="song-title">${escapeHtml(v.title)}</div>
+                <div class="song-channel">${escapeHtml(v.channelName)}</div>
+                ${stats ? `<div class="song-stats">${escapeHtml(stats)}</div>` : ''}
+              </div>
+            </div>
+          </article>
+        `;
+      })
+      .join('');
+  }
+
+  function openSearchVideoItem(idx) {
+    const v = state.searchVideoItems[idx];
+    if (!v) return;
+    if (v.kind === 'episode' && v.seriesSlug) {
+      openSeriesWatch(v.seriesSlug, v.youtubeVideoId);
+      return;
+    }
+    state.watchReturnView = 'series';
+    state.watch = {
+      songList: [
+        {
+          ...v,
+          songType: v.songType || 'ost',
+          animeTitle: v.seriesTitle || v.title,
+        },
+      ],
+      activeSongIndex: 0,
+    };
+    el.episodeQueuePanel.hidden = true;
+    el.saveSeriesBtn.hidden = true;
+    switchView('watch');
+    playActiveSong();
   }
 
   function registerSeriesItem(item) {
@@ -2853,6 +2964,21 @@
       if (!card) return;
       openLiveStreamWatch(card.dataset.liveVid);
     });
+
+    if (el.searchVideosGrid) {
+      el.searchVideosGrid.addEventListener('click', (e) => {
+        const card = e.target.closest('[data-search-video-index]');
+        if (!card) return;
+        openSearchVideoItem(parseInt(card.dataset.searchVideoIndex, 10));
+      });
+      el.searchVideosGrid.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const card = e.target.closest('[data-search-video-index]');
+        if (!card) return;
+        e.preventDefault();
+        openSearchVideoItem(parseInt(card.dataset.searchVideoIndex, 10));
+      });
+    }
 
     [el.views.series, el.views.watchlist, el.views.history].forEach((viewNode) => {
       if (!viewNode) return;

@@ -32,7 +32,7 @@
       <input
         id="searchInput"
         type="search"
-        placeholder="Search anime, #tags, or channels"
+        placeholder="Search anime, videos, songs, #tags, or channels"
         autocomplete="off"
       />
       <button id="clearSearchBtn" type="button" class="clear-btn" hidden aria-label="Clear search">✕</button>
@@ -167,6 +167,14 @@
             </div>
           </div>
           <div id="gemsShelfGrid" class="shelf-row"></div>
+        </section>
+
+        <section id="searchVideosShelf" class="home-shelf" hidden>
+          <div class="shelf-header">
+            <h2 class="shelf-title">Matching Videos</h2>
+            <span id="searchVideosCount" class="section-meta"></span>
+          </div>
+          <div id="searchVideosGrid" class="songs-grid"></div>
         </section>
 
         <div class="shelf-header grid-header">

@@ -166,6 +166,22 @@ test('Hono API serves channels, grouped series, FTS search, and series detail', 
   assert.equal(songsPageRes.status, 200);
   assert.match(await songsPageRes.text(), /Anime Songs — Official OP, ED &amp; OST/);
 
+  // Specific video search across episodes and songs (/api/videos)
+  const vidSearchRes = await app.request('/api/videos?q=Frieren+EP02');
+  assert.equal(vidSearchRes.status, 200);
+  const vidSearchJson = (await vidSearchRes.json()) as any;
+  assert.equal(vidSearchJson.items.length, 1);
+  assert.equal(vidSearchJson.items[0].kind, 'episode');
+  assert.equal(vidSearchJson.items[0].youtubeVideoId, 'vid_en_2');
+  assert.equal(vidSearchJson.items[0].seriesSlug, 'frieren');
+
+  const vidSongSearchRes = await app.request('/api/videos?q=Yuusha');
+  assert.equal(vidSongSearchRes.status, 200);
+  const vidSongSearchJson = (await vidSongSearchRes.json()) as any;
+  assert.equal(vidSongSearchJson.items.length, 1);
+  assert.equal(vidSongSearchJson.items[0].kind, 'song');
+  assert.equal(vidSongSearchJson.items[0].youtubeVideoId, 'song_op_1');
+
   // Shelves require at least 3 free episodes; the fixture only has 2.
   const shortUnlockedJson = (await (await app.request('/api/unlocked')).json()) as any;
   assert.equal(shortUnlockedJson.items.length, 0);

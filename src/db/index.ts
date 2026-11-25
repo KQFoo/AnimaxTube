@@ -1736,3 +1736,179 @@ export function querySongGroups(
 
   return { groups, total, page, limit, counts };
 }
+
+export interface VideoSearchItem {
+  kind: 'episode' | 'song';
+  id: number;
+  youtubeVideoId: string;
+  title: string;
+  thumbnailUrl: string | null;
+  durationIso: string | null;
+  viewCount: number;
+  likeCount: number;
+  publishedAt: number | null;
+  channelId: number;
+  channelName: string;
+  channelAvatar: string | null;
+  channelUrl: string;
+  regionFocus: string | null;
+  seriesSlug: string | null;
+  seriesTitle: string | null;
+  episodeNumber: number | null;
+  songType: 'op' | 'ed' | 'ost' | null;
+  playlistId: string | null;
+  playlistTitle: string | null;
+  regionAllowed: string[];
+  regionBlocked: string[];
+}
+
+export function queryVideosSearch(
+  db: DatabaseSync,
+  opts: {
+    q: string;
+    region?: string | null;
+    channelId?: number;
+    limit?: number;
+  }
+): { items: VideoSearchItem[]; total: number } {
+  const q = opts.q.trim();
+  if (!q) return { items: [], total: 0 };
+
+  const limit = Math.min(48, Math.max(1, opts.limit || 16));
+  const region = normalizeRegionCode(opts.region);
+  const tokens = q.split(/\s+/).filter(Boolean).slice(0, 6);
+
+  // Match episodes where every search token appears across video title, series title, channel name, or exact video ID
+  const epGeo = buildEpisodeGeoSql(db, 'e', region);
+  const epWhere: string[] = ['c.is_verified = 1', 'e.is_members_only = 0', epGeo.sql];
+  const epParams: Array<string | number> = [...epGeo.params];
+  if (opts.channelId) {
+    epWhere.push('e.channel_id = ?');
+    epParams.push(opts.channelId);
+  }
+  for (const tok of tokens) {
+    const like = `%${tok}%`;
+    epWhere.push(
+      "(e.title LIKE ? OR e.youtube_video_id = ? OR COALESCE(s.canonical_title, '') LIKE ? OR COALESCE(s.title_en, '') LIKE ? OR COALESCE(s.title_zh, '') LIKE ? OR c.name LIKE ?)"
+    );
+    epParams.push(like, tok, like, like, like, like);
+  }
+
+  const epRows = db
+    .prepare(
+      `SELECT e.id, e.youtube_video_id, e.title, e.thumbnail_url, e.duration_iso,
+              e.view_count, e.like_count, e.published_at, e.episode_number,
+              e.region_allowed, e.region_blocked,
+              c.id AS channel_id, c.name AS channel_name, c.avatar_url AS channel_avatar, c.url AS channel_url, c.region_focus,
+              s.slug AS series_slug, s.canonical_title AS series_title,
+              cs.playlist_id, cs.playlist_title
+       FROM episodes e
+       JOIN channels c ON c.id = e.channel_id
+       JOIN series s ON s.id = e.series_id
+       LEFT JOIN channel_series cs ON cs.id = e.channel_series_id
+       WHERE ${epWhere.join(' AND ')}
+       ORDER BY COALESCE(e.view_count, 0) DESC, COALESCE(e.published_at, 0) DESC
+       LIMIT ?`
+    )
+    .all(...epParams, limit) as unknown as Array<Record<string, unknown>>;
+
+  // Match songs where every search token appears across song title, anime title, channel name, or exact video ID
+  const sgGeo = buildLiveGeoSql(db, 'sg', region);
+  const sgWhere: string[] = ['c.is_verified = 1', sgGeo.sql];
+  const sgParams: Array<string | number> = [...sgGeo.params];
+  if (opts.channelId) {
+    sgWhere.push('sg.channel_id = ?');
+    sgParams.push(opts.channelId);
+  }
+  for (const tok of tokens) {
+    const like = `%${tok}%`;
+    sgWhere.push(
+      "(sg.title LIKE ? OR sg.youtube_video_id = ? OR COALESCE(sg.anime_title, '') LIKE ? OR COALESCE(sg.playlist_title, '') LIKE ? OR c.name LIKE ?)"
+    );
+    sgParams.push(like, tok, like, like, like);
+  }
+
+  const sgRows = db
+    .prepare(
+      `SELECT sg.id, sg.youtube_video_id, sg.title, sg.thumbnail_url, sg.duration_iso,
+              sg.view_count, sg.like_count, sg.published_at, sg.song_type,
+              sg.region_allowed, sg.region_blocked, sg.playlist_id, sg.playlist_title,
+              c.id AS channel_id, c.name AS channel_name, c.avatar_url AS channel_avatar, c.url AS channel_url, c.region_focus,
+              s.slug AS series_slug, s.canonical_title AS series_title
+       FROM songs sg
+       JOIN channels c ON c.id = sg.channel_id
+       LEFT JOIN series s ON s.id = sg.series_id
+       WHERE ${sgWhere.join(' AND ')}
+       ORDER BY COALESCE(sg.view_count, 0) DESC, COALESCE(sg.published_at, 0) DESC
+       LIMIT ?`
+    )
+    .all(...sgParams, Math.min(8, limit)) as unknown as Array<Record<string, unknown>>;
+
+  const seenVidIds = new Set<string>();
+  const merged: VideoSearchItem[] = [];
+
+  for (const r of epRows) {
+    const vid = String(r.youtube_video_id);
+    if (seenVidIds.has(vid)) continue;
+    seenVidIds.add(vid);
+    merged.push({
+      kind: 'episode',
+      id: Number(r.id),
+      youtubeVideoId: vid,
+      title: String(r.title || ''),
+      thumbnailUrl: (r.thumbnail_url as string | null) ?? null,
+      durationIso: (r.duration_iso as string | null) ?? null,
+      viewCount: Number(r.view_count) || 0,
+      likeCount: Number(r.like_count) || 0,
+      publishedAt: (r.published_at as number | null) ?? null,
+      channelId: Number(r.channel_id),
+      channelName: String(r.channel_name || ''),
+      channelAvatar: (r.channel_avatar as string | null) ?? null,
+      channelUrl: String(r.channel_url || ''),
+      regionFocus: (r.region_focus as string | null) ?? null,
+      seriesSlug: (r.series_slug as string | null) ?? null,
+      seriesTitle: (r.series_title as string | null) ?? null,
+      episodeNumber: r.episode_number !== null && r.episode_number !== undefined ? Number(r.episode_number) : null,
+      songType: null,
+      playlistId: (r.playlist_id as string | null) ?? null,
+      playlistTitle: (r.playlist_title as string | null) ?? null,
+      regionAllowed: parseJsonArray(r.region_allowed as string | null),
+      regionBlocked: parseJsonArray(r.region_blocked as string | null),
+    });
+  }
+
+  for (const r of sgRows) {
+    const vid = String(r.youtube_video_id);
+    if (seenVidIds.has(vid)) continue;
+    seenVidIds.add(vid);
+    const st = r.song_type === 'op' || r.song_type === 'ed' ? r.song_type : 'ost';
+    merged.push({
+      kind: 'song',
+      id: Number(r.id),
+      youtubeVideoId: vid,
+      title: String(r.title || ''),
+      thumbnailUrl: (r.thumbnail_url as string | null) ?? null,
+      durationIso: (r.duration_iso as string | null) ?? null,
+      viewCount: Number(r.view_count) || 0,
+      likeCount: Number(r.like_count) || 0,
+      publishedAt: (r.published_at as number | null) ?? null,
+      channelId: Number(r.channel_id),
+      channelName: String(r.channel_name || ''),
+      channelAvatar: (r.channel_avatar as string | null) ?? null,
+      channelUrl: String(r.channel_url || ''),
+      regionFocus: (r.region_focus as string | null) ?? null,
+      seriesSlug: (r.series_slug as string | null) ?? null,
+      seriesTitle: (r.series_title as string | null) ?? null,
+      episodeNumber: null,
+      songType: st,
+      playlistId: (r.playlist_id as string | null) ?? null,
+      playlistTitle: (r.playlist_title as string | null) ?? null,
+      regionAllowed: parseJsonArray(r.region_allowed as string | null),
+      regionBlocked: parseJsonArray(r.region_blocked as string | null),
+    });
+  }
+
+  merged.sort((a, b) => b.viewCount - a.viewCount || (b.publishedAt || 0) - (a.publishedAt || 0));
+  const items = merged.slice(0, limit);
+  return { items, total: items.length };
+}

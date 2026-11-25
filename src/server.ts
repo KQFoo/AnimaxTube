@@ -19,6 +19,7 @@ import {
   querySongGroups,
   querySongsList,
   queryTopTags,
+  queryVideosSearch,
 } from './db/index.ts';
 import { queryCalendar } from './db/calendar.ts';
 import { ensureSeedDatabase } from './db/seed.ts';
@@ -189,6 +190,15 @@ export function createApp(dbPath?: string, opts: AppOptions = {}) {
       return c.json(querySongGroups(db, { type, q, channelId, region, sort, page, limit }));
     }
     return c.json(querySongsList(db, { type, q, channelId, region, sort, page, limit }));
+  });
+
+  app.get('/api/videos', (c) => {
+    const q = c.req.query('q')?.slice(0, 120) || '';
+    const region = c.req.query('region') || null;
+    const channelRaw = c.req.query('channel');
+    const channelId = channelRaw ? parseInt(channelRaw, 10) || undefined : undefined;
+    const limit = clampInt(c.req.query('limit'), 16, 1, 48);
+    return c.json(queryVideosSearch(db, { q, region, channelId, limit }));
   });
 
   app.get('/api/calendar', (c) => {
