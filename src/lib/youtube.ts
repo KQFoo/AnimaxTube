@@ -68,6 +68,17 @@ export interface YtCommentItem {
   likeCount: number;
 }
 
+export interface YtSearchResult {
+  kind: 'video' | 'playlist' | 'channel';
+  id: string;
+  title: string;
+  description: string;
+  channelId: string;
+  channelTitle: string;
+  thumbnailUrl: string | null;
+  publishedAt: string | null;
+}
+
 let activeKeyIndex = 0;
 
 export function resetKeyRotation(): void {
@@ -93,8 +104,43 @@ export function getYouTubeApiKey(): string {
 }
 
 let sessionQuotaUnits = 0;
+let quotaRecorder: ((units: number) => void) | null = null;
+
 export function getSessionQuotaUnits(): number {
   return sessionQuotaUnits;
+}
+
+export function setQuotaRecorder(fn: ((units: number) => void) | null): void {
+  quotaRecorder = fn;
+}
+
+export function getYouTubeQuotaDayKey(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const y = parts.find((p) => p.type === 'year')?.value || '1970';
+  const m = parts.find((p) => p.type === 'month')?.value || '01';
+  const d = parts.find((p) => p.type === 'day')?.value || '01';
+  return `${y}-${m}-${d}`;
+}
+
+export function getNextQuotaResetUnix(now = new Date()): number {
+  const currentDay = getYouTubeQuotaDayKey(now);
+  // Step forward in 15-minute increments (max 25h) to find exact Pacific midnight across DST
+  let lo = Math.floor(now.getTime() / 1000);
+  let hi = lo + 25 * 3600;
+  while (hi - lo > 60) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (getYouTubeQuotaDayKey(new Date(mid * 1000)) === currentDay) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return hi;
 }
 
 function isQuotaExceededError(status: number, body: string): boolean {
@@ -111,6 +157,13 @@ async function ytFetchJson<T>(buildUrl: (apiKey: string) => string, quotaCost: n
     const key = keys[activeKeyIndex % keys.length];
     const res = await fetch(buildUrl(key));
     sessionQuotaUnits += quotaCost;
+    if (quotaRecorder) {
+      try {
+        quotaRecorder(quotaCost);
+      } catch {
+        // ignore quota persistence errors
+      }
+    }
     if (res.ok) {
       return (await res.json()) as T;
     }
@@ -194,6 +247,41 @@ export async function searchChannels(
       description: item.snippet?.description || '',
     }))
     .filter((c) => Boolean(c.channelId));
+}
+
+export async function searchYouTube(
+  query: string,
+  type: 'video' | 'playlist' | 'channel' = 'playlist',
+  maxResults = 8
+): Promise<YtSearchResult[]> {
+  const clamped = Math.min(15, Math.max(1, maxResults));
+  const data = await ytFetchJson<{ items?: any[] }>(
+    (key) => `${YT_API}/search?part=snippet&type=${type}&maxResults=${clamped}&q=${encodeURIComponent(query)}&key=${key}`,
+    100,
+    `search.list(${type}:${query})`
+  );
+  return (data.items || [])
+    .map((item) => {
+      const id =
+        type === 'video'
+          ? item.id?.videoId || ''
+          : type === 'playlist'
+            ? item.id?.playlistId || ''
+            : item.id?.channelId || item.snippet?.channelId || '';
+      const thumbs = item.snippet?.thumbnails;
+      const thumbnailUrl = thumbs?.high?.url || thumbs?.medium?.url || thumbs?.default?.url || null;
+      return {
+        kind: type,
+        id,
+        title: decodeXml(item.snippet?.title || ''),
+        description: decodeXml(item.snippet?.description || ''),
+        channelId: item.snippet?.channelId || '',
+        channelTitle: decodeXml(item.snippet?.channelTitle || ''),
+        thumbnailUrl,
+        publishedAt: item.snippet?.publishedAt || null,
+      };
+    })
+    .filter((r) => Boolean(r.id));
 }
 
 export async function fetchAllPlaylists(channelId: string, maxPages = 20): Promise<YtPlaylist[]> {

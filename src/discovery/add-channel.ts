@@ -39,6 +39,8 @@ export interface UpsertChannelInput {
   discoverySource: string;
   isVerified: boolean;
   playlistCount: number;
+  syncPlaylists?: boolean;
+  syncVideos?: boolean;
 }
 
 export interface AddChannelOptions {
@@ -48,6 +50,8 @@ export interface AddChannelOptions {
   discoverySource?: string;
   force?: boolean;
   dryRun?: boolean;
+  syncPlaylists?: boolean;
+  syncVideos?: boolean;
 }
 
 export interface AddChannelResult {
@@ -185,12 +189,15 @@ export function upsertChannel(db: DatabaseSync, data: UpsertChannelInput): numbe
     ? `https://www.youtube.com/${handle.startsWith('@') ? handle : `@${handle}`}`
     : `https://www.youtube.com/channel/${data.info.id}`;
 
+  const syncPlaylistsVal = data.syncPlaylists === undefined ? null : data.syncPlaylists ? 1 : 0;
+  const syncVideosVal = data.syncVideos === undefined ? null : data.syncVideos ? 1 : 0;
+
   db.prepare(
     `INSERT INTO channels (
       youtube_channel_id, handle, name, url, avatar_url, description,
       uploads_playlist_id, region_focus, sub_languages, category,
-      discovery_source, is_verified, playlist_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      discovery_source, is_verified, playlist_count, sync_playlists, sync_videos
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1), COALESCE(?, 1))
     ON CONFLICT(youtube_channel_id) DO UPDATE SET
       handle = COALESCE(excluded.handle, channels.handle),
       name = excluded.name,
@@ -202,6 +209,8 @@ export function upsertChannel(db: DatabaseSync, data: UpsertChannelInput): numbe
       sub_languages = excluded.sub_languages,
       category = excluded.category,
       playlist_count = excluded.playlist_count,
+      sync_playlists = CASE WHEN ? IS NOT NULL THEN ? ELSE channels.sync_playlists END,
+      sync_videos = CASE WHEN ? IS NOT NULL THEN ? ELSE channels.sync_videos END,
       discovery_source = CASE
         WHEN channels.discovery_source = 'manual' AND excluded.discovery_source != 'manual' THEN 'manual'
         WHEN excluded.discovery_source = 'search_pending' AND channels.discovery_source IN ('search', 'registry', 'rejected') THEN channels.discovery_source
@@ -227,7 +236,13 @@ export function upsertChannel(db: DatabaseSync, data: UpsertChannelInput): numbe
     data.category,
     data.discoverySource,
     data.isVerified ? 1 : 0,
-    data.playlistCount
+    data.playlistCount,
+    syncPlaylistsVal,
+    syncVideosVal,
+    syncPlaylistsVal,
+    syncPlaylistsVal,
+    syncVideosVal,
+    syncVideosVal
   );
 
   const row = db
@@ -317,6 +332,8 @@ export async function addOrUpdateSingleChannel(
     discoverySource: opts.discoverySource || 'manual',
     isVerified: true,
     playlistCount: check.playlistCount,
+    syncPlaylists: opts.syncPlaylists,
+    syncVideos: opts.syncVideos,
   });
 
   return {

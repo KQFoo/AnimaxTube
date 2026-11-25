@@ -1,6 +1,22 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 
+export interface QueuedJobInfo {
+  id: string;
+  label: string;
+}
+
+export interface RunQueuedNowResult {
+  ok: boolean;
+  startedOrPromoted: string | null;
+  preemptedRunningJob: string | null;
+}
+
+export interface RemoveQueuedResult {
+  ok: boolean;
+  removedLabel: string | null;
+}
+
 export interface JobStatusSnapshot {
   runningJob: string | null;
   startedAt: number | null;
@@ -8,6 +24,7 @@ export interface JobStatusSnapshot {
   lastFinishedAt: number | null;
   lastExitCode: number | null;
   queuedCount: number;
+  queuedJobs: QueuedJobInfo[];
   autoSyncEnabled: boolean;
   hasYouTubeApiKey: boolean;
   intervals: {
@@ -24,14 +41,33 @@ export interface JobStatusSnapshot {
   };
 }
 
+export type SyncScope = 'both' | 'playlists' | 'videos';
+
 export interface JobCoordinator {
   triggerLiveCheck: () => boolean;
-  triggerChannelSync: (youtubeChannelId?: string) => boolean;
-  triggerIncrementalSync: () => boolean;
-  triggerFullSync: () => boolean;
+  triggerChannelSync: (youtubeChannelId?: string, scope?: SyncScope) => boolean;
+  triggerIncrementalSync: (scope?: SyncScope) => boolean;
+  triggerFullSync: (scope?: SyncScope) => boolean;
+  triggerSongSync: () => boolean;
   triggerDiscovery: () => boolean;
+  runQueuedNow: (jobId?: string) => RunQueuedNowResult;
+  removeQueuedJob: (jobId: string) => RemoveQueuedResult;
   getStatus: () => JobStatusSnapshot;
   stop: () => void;
+}
+
+function scopeCliArgs(scope?: SyncScope): string[] {
+  if (scope === 'playlists') return ['--playlists-only'];
+  if (scope === 'videos') return ['--videos-only'];
+  if (scope === 'both') return ['--sync-both'];
+  return [];
+}
+
+function scopeLabelSuffix(scope?: SyncScope): string {
+  if (scope === 'playlists') return ' [playlists only]';
+  if (scope === 'videos') return ' [videos only]';
+  if (scope === 'both') return ' [playlists + videos]';
+  return '';
 }
 
 function hasYouTubeApiKey(): boolean {
@@ -104,12 +140,14 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
   let lastFinishedAt: number | null = null;
   let lastExitCode: number | null = null;
 
-  const pendingChannelIds = new Set<string>();
+  const pendingChannelJobs = new Map<string, { youtubeChannelId: string; scope?: SyncScope }>();
   let pendingUnsynced = false;
   let pendingDiscovery = false;
-  let pendingFullSync = false;
-  let pendingIncremental = false;
+  let pendingFullSync: { queued: boolean; scope?: SyncScope } = { queued: false };
+  let pendingIncremental: { queued: boolean; scope?: SyncScope } = { queued: false };
+  let pendingSongSync = false;
   let pendingLive = false;
+  let priorityJobId: string | null = null;
 
   const nowSec = () => Math.floor(Date.now() / 1000);
   let nextLiveAt: number | null = autoSyncEnabled && canSpawn ? nowSec() + 60 : null;
@@ -118,12 +156,55 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
   let nextDiscoveryAt: number | null =
     autoSyncEnabled && canSpawn && discoveryHours > 0 ? nowSec() + discoveryHours * 3600 : null;
 
+  const listQueuedJobs = (): QueuedJobInfo[] => {
+    const list: QueuedJobInfo[] = [];
+    for (const [key, job] of pendingChannelJobs.entries()) {
+      list.push({
+        id: `channel:${key}`,
+        label: `channel sync (${job.youtubeChannelId}${scopeLabelSuffix(job.scope)})`,
+      });
+    }
+    if (pendingUnsynced) {
+      list.push({ id: 'unsynced', label: 'new channel backfill sync' });
+    }
+    if (pendingDiscovery) {
+      list.push({ id: 'discovery', label: 'channel discovery scan' });
+    }
+    if (pendingFullSync.queued) {
+      list.push({
+        id: 'full',
+        label: `daily full channel & episode sync${scopeLabelSuffix(pendingFullSync.scope)}`,
+      });
+    }
+    if (pendingIncremental.queued) {
+      list.push({
+        id: 'incremental',
+        label: `incremental episode sync (${incrementalHours}h)${scopeLabelSuffix(pendingIncremental.scope)}`,
+      });
+    }
+    if (pendingSongSync) {
+      list.push({ id: 'songs', label: 'anime songs sync (OP/ED/OST)' });
+    }
+    if (pendingLive) {
+      list.push({ id: 'live', label: 'live & unlock check' });
+    }
+    if (priorityJobId) {
+      const idx = list.findIndex((item) => item.id === priorityJobId);
+      if (idx > 0) {
+        const [promoted] = list.splice(idx, 1);
+        list.unshift(promoted);
+      }
+    }
+    return list;
+  };
+
   const queuedCount = () =>
-    pendingChannelIds.size +
+    pendingChannelJobs.size +
     (pendingUnsynced ? 1 : 0) +
     (pendingDiscovery ? 1 : 0) +
-    (pendingFullSync ? 1 : 0) +
-    (pendingIncremental ? 1 : 0) +
+    (pendingFullSync.queued ? 1 : 0) +
+    (pendingIncremental.queued ? 1 : 0) +
+    (pendingSongSync ? 1 : 0) +
     (pendingLive ? 1 : 0);
 
   const launchScript = (scriptRelPath: string, args: string[], label: string) => {
@@ -168,39 +249,101 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     });
   };
 
+  const launchQueuedById = (id: string): boolean => {
+    if (id.startsWith('channel:')) {
+      const key = id.slice('channel:'.length);
+      const job = pendingChannelJobs.get(key);
+      if (!job) return false;
+      pendingChannelJobs.delete(key);
+      launchScript(
+        'src/ingestion/sync-channels.ts',
+        [`--channel=${job.youtubeChannelId}`, ...scopeCliArgs(job.scope)],
+        `channel sync (${job.youtubeChannelId}${scopeLabelSuffix(job.scope)})`
+      );
+      return true;
+    }
+    if (id === 'unsynced' && pendingUnsynced) {
+      pendingUnsynced = false;
+      launchScript('src/ingestion/sync-channels.ts', ['--only-unsynced'], 'new channel backfill sync');
+      return true;
+    }
+    if (id === 'discovery' && pendingDiscovery) {
+      pendingDiscovery = false;
+      launchScript('src/discovery/discover-channels.ts', [], 'channel discovery scan');
+      return true;
+    }
+    if (id === 'full' && pendingFullSync.queued) {
+      const scope = pendingFullSync.scope;
+      pendingFullSync = { queued: false };
+      pendingIncremental = { queued: false };
+      launchScript(
+        'src/ingestion/sync-channels.ts',
+        scopeCliArgs(scope),
+        `daily full channel & episode sync${scopeLabelSuffix(scope)}`
+      );
+      return true;
+    }
+    if (id === 'incremental' && pendingIncremental.queued) {
+      const scope = pendingIncremental.scope;
+      pendingIncremental = { queued: false };
+      launchScript(
+        'src/ingestion/sync-channels.ts',
+        ['--incremental', ...scopeCliArgs(scope)],
+        `incremental episode sync (${incrementalHours}h)${scopeLabelSuffix(scope)}`
+      );
+      return true;
+    }
+    if (id === 'songs' && pendingSongSync) {
+      pendingSongSync = false;
+      launchScript('src/ingestion/sync-songs.ts', [], 'anime songs sync (OP/ED/OST)');
+      return true;
+    }
+    if (id === 'live' && pendingLive) {
+      pendingLive = false;
+      launchScript('src/tracking/live-and-unlocks.ts', [`--locked-limit=${lockedLimit}`], 'live & unlock check');
+      return true;
+    }
+    return false;
+  };
+
   const drainQueue = () => {
     if (stopped || !canSpawn || activeChild) return;
 
-    const nextCh = pendingChannelIds.values().next().value as string | undefined;
-    if (nextCh) {
-      pendingChannelIds.delete(nextCh);
-      launchScript('src/ingestion/sync-channels.ts', [`--channel=${nextCh}`], `channel sync (${nextCh})`);
+    if (priorityJobId) {
+      const targetId = priorityJobId;
+      priorityJobId = null;
+      if (launchQueuedById(targetId)) return;
+    }
+
+    const nextEntry = pendingChannelJobs.entries().next().value as
+      | [string, { youtubeChannelId: string; scope?: SyncScope }]
+      | undefined;
+    if (nextEntry) {
+      launchQueuedById(`channel:${nextEntry[0]}`);
       return;
     }
     if (pendingUnsynced) {
-      pendingUnsynced = false;
-      launchScript('src/ingestion/sync-channels.ts', ['--only-unsynced'], 'new channel backfill sync');
+      launchQueuedById('unsynced');
       return;
     }
     if (pendingDiscovery) {
-      pendingDiscovery = false;
-      launchScript('src/discovery/discover-channels.ts', [], 'channel discovery scan');
+      launchQueuedById('discovery');
       return;
     }
-    if (pendingFullSync) {
-      pendingFullSync = false;
-      pendingIncremental = false;
-      launchScript('src/ingestion/sync-channels.ts', [], 'daily full channel & episode sync');
+    if (pendingFullSync.queued) {
+      launchQueuedById('full');
       return;
     }
-    if (pendingIncremental) {
-      pendingIncremental = false;
-      launchScript('src/ingestion/sync-channels.ts', ['--incremental'], `incremental episode sync (${incrementalHours}h)`);
+    if (pendingIncremental.queued) {
+      launchQueuedById('incremental');
+      return;
+    }
+    if (pendingSongSync) {
+      launchQueuedById('songs');
       return;
     }
     if (pendingLive) {
-      pendingLive = false;
-      launchScript('src/tracking/live-and-unlocks.ts', [`--locked-limit=${lockedLimit}`], 'live & unlock check');
+      launchQueuedById('live');
     }
   };
 
@@ -224,8 +367,8 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
             discoveryHours * 3600
           );
           if (overdue.unsynced) pendingUnsynced = true;
-          if (overdue.fullOverdue) pendingFullSync = true;
-          else if (overdue.incrementalOverdue) pendingIncremental = true;
+          if (overdue.fullOverdue) pendingFullSync = { queued: true };
+          else if (overdue.incrementalOverdue) pendingIncremental = { queued: true };
           if (overdue.discoveryOverdue) pendingDiscovery = true;
         } catch (err) {
           console.warn('[scheduler] Startup overdue check failed:', err instanceof Error ? err.message : err);
@@ -250,7 +393,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     const incrementalTimer = setInterval(() => {
       nextIncrementalAt = nowSec() + incrementalHours * 3600;
       enqueue(() => {
-        pendingIncremental = true;
+        pendingIncremental = { queued: true };
       });
     }, incrementalHours * 3_600_000);
     incrementalTimer.unref();
@@ -259,7 +402,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
     const channelTimer = setInterval(() => {
       nextFullSyncAt = nowSec() + channelHours * 3600;
       enqueue(() => {
-        pendingFullSync = true;
+        pendingFullSync = { queued: true };
       });
     }, channelHours * 3_600_000);
     channelTimer.unref();
@@ -288,23 +431,85 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
       enqueue(() => {
         pendingLive = true;
       }),
-    triggerChannelSync: (youtubeChannelId?: string) =>
+    triggerChannelSync: (youtubeChannelId?: string, scope?: SyncScope) =>
       enqueue(() => {
-        if (youtubeChannelId) pendingChannelIds.add(youtubeChannelId);
-        else pendingFullSync = true;
+        if (youtubeChannelId) {
+          const key = `${youtubeChannelId}:${scope || 'default'}`;
+          pendingChannelJobs.set(key, { youtubeChannelId, scope });
+        } else {
+          pendingFullSync = { queued: true, scope };
+        }
       }),
-    triggerIncrementalSync: () =>
+    triggerIncrementalSync: (scope?: SyncScope) =>
       enqueue(() => {
-        pendingIncremental = true;
+        pendingIncremental = { queued: true, scope };
       }),
-    triggerFullSync: () =>
+    triggerFullSync: (scope?: SyncScope) =>
       enqueue(() => {
-        pendingFullSync = true;
+        pendingFullSync = { queued: true, scope };
+      }),
+    triggerSongSync: () =>
+      enqueue(() => {
+        pendingSongSync = true;
       }),
     triggerDiscovery: () =>
       enqueue(() => {
         pendingDiscovery = true;
       }),
+    runQueuedNow: (jobId?: string): RunQueuedNowResult => {
+      if (stopped || !canSpawn) {
+        return { ok: false, startedOrPromoted: null, preemptedRunningJob: null };
+      }
+      const queued = listQueuedJobs();
+      if (queued.length === 0) {
+        return { ok: false, startedOrPromoted: null, preemptedRunningJob: null };
+      }
+      const target = jobId ? queued.find((q) => q.id === jobId) : queued[0];
+      if (!target) {
+        return { ok: false, startedOrPromoted: null, preemptedRunningJob: null };
+      }
+      priorityJobId = target.id;
+      if (activeChild) {
+        const preempted = runningJob;
+        const childToStop = activeChild;
+        childToStop.kill('SIGTERM');
+        const killFallback = setTimeout(() => {
+          if (activeChild === childToStop) {
+            childToStop.kill('SIGKILL');
+          }
+        }, 5000);
+        killFallback.unref();
+        return { ok: true, startedOrPromoted: target.label, preemptedRunningJob: preempted };
+      }
+      drainQueue();
+      return { ok: true, startedOrPromoted: target.label, preemptedRunningJob: null };
+    },
+    removeQueuedJob: (jobId: string): RemoveQueuedResult => {
+      const queued = listQueuedJobs();
+      const target = queued.find((q) => q.id === jobId);
+      if (!target) {
+        return { ok: false, removedLabel: null };
+      }
+      if (jobId.startsWith('channel:')) {
+        pendingChannelJobs.delete(jobId.slice('channel:'.length));
+      } else if (jobId === 'unsynced') {
+        pendingUnsynced = false;
+      } else if (jobId === 'discovery') {
+        pendingDiscovery = false;
+      } else if (jobId === 'full') {
+        pendingFullSync = { queued: false };
+      } else if (jobId === 'incremental') {
+        pendingIncremental = { queued: false };
+      } else if (jobId === 'songs') {
+        pendingSongSync = false;
+      } else if (jobId === 'live') {
+        pendingLive = false;
+      }
+      if (priorityJobId === jobId) {
+        priorityJobId = null;
+      }
+      return { ok: true, removedLabel: target.label };
+    },
     getStatus: () => ({
       runningJob,
       startedAt,
@@ -312,6 +517,7 @@ export function startBackgroundSyncScheduler(db?: DatabaseSync): JobCoordinator 
       lastFinishedAt,
       lastExitCode,
       queuedCount: queuedCount(),
+      queuedJobs: listQueuedJobs(),
       autoSyncEnabled,
       hasYouTubeApiKey: hasYouTubeApiKey(),
       intervals: {

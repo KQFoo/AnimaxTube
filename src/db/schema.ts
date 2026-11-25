@@ -13,6 +13,8 @@ export interface ChannelRow {
   discovery_source: string;
   is_verified: number;
   playlist_count: number;
+  sync_playlists: number;
+  sync_videos: number;
   last_synced_at: number | null;
   created_at: number;
 }
@@ -105,6 +107,26 @@ export interface LiveStreamRow {
   checked_at: number;
 }
 
+export interface SongRow {
+  id: number;
+  channel_id: number;
+  series_id: number | null;
+  youtube_video_id: string;
+  playlist_id: string | null;
+  playlist_title: string | null;
+  title: string;
+  song_type: 'op' | 'ed' | 'ost';
+  anime_title: string | null;
+  duration_iso: string | null;
+  thumbnail_url: string | null;
+  published_at: number | null;
+  view_count: number | null;
+  like_count: number | null;
+  region_allowed: string | null;
+  region_blocked: string | null;
+  created_at: number;
+}
+
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -125,6 +147,8 @@ CREATE TABLE IF NOT EXISTS channels (
   discovery_source TEXT NOT NULL DEFAULT 'registry',
   is_verified INTEGER NOT NULL DEFAULT 1,
   playlist_count INTEGER NOT NULL DEFAULT 0,
+  sync_playlists INTEGER NOT NULL DEFAULT 1,
+  sync_videos INTEGER NOT NULL DEFAULT 1,
   last_synced_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -231,6 +255,26 @@ CREATE TABLE IF NOT EXISTS live_streams (
   checked_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+CREATE TABLE IF NOT EXISTS songs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  series_id INTEGER REFERENCES series(id) ON DELETE SET NULL,
+  youtube_video_id TEXT NOT NULL UNIQUE,
+  playlist_id TEXT,
+  playlist_title TEXT,
+  title TEXT NOT NULL,
+  song_type TEXT NOT NULL DEFAULT 'ost',
+  anime_title TEXT,
+  duration_iso TEXT,
+  thumbnail_url TEXT,
+  published_at INTEGER,
+  view_count INTEGER,
+  like_count INTEGER,
+  region_allowed TEXT,
+  region_blocked TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 CREATE TABLE IF NOT EXISTS series_view_snapshots (
   series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
   captured_at INTEGER NOT NULL,
@@ -290,6 +334,9 @@ CREATE INDEX IF NOT EXISTS idx_series_updated ON series(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_series_views ON series(total_views DESC);
 CREATE INDEX IF NOT EXISTS idx_series_buzz ON series(buzz_score DESC);
 CREATE INDEX IF NOT EXISTS idx_live_streams_status ON live_streams(status, concurrent_viewers DESC);
+CREATE INDEX IF NOT EXISTS idx_songs_type_views ON songs(song_type, view_count DESC);
+CREATE INDEX IF NOT EXISTS idx_songs_channel ON songs(channel_id);
+CREATE INDEX IF NOT EXISTS idx_songs_published ON songs(published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_series_tags_series ON series_tags(series_id);
 CREATE INDEX IF NOT EXISTS idx_region_cs_series ON region_cs_cache(region, series_id, sub_language);
 CREATE INDEX IF NOT EXISTS idx_region_cs_channel ON region_cs_cache(region, channel_id, series_id);

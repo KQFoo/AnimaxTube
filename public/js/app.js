@@ -33,6 +33,7 @@
   const VIEW_TITLES = {
     channels: 'Official Licensed Anime Channels on YouTube | AnimaxTube',
     calendar: 'YouTube Anime Release Calendar & Schedule | AnimaxTube',
+    songs: 'Anime Songs — Official OP, ED & OST on YouTube | AnimaxTube',
     watchlist: 'Watchlist | AnimaxTube',
     history: 'Watch History | AnimaxTube',
     about: 'About, Legal & DMCA | AnimaxTube',
@@ -89,6 +90,234 @@
   const seriesCatalog = new Map();
   let seriesAbortCtrl = null;
   let loadMoreObserver = null;
+  let adminSessionChecked = false;
+  let isAdminSession = false;
+
+  async function checkAdminSession() {
+    if (adminSessionChecked) return isAdminSession;
+    adminSessionChecked = true;
+    try {
+      const res = await fetch('/api/admin/session', { credentials: 'same-origin' });
+      isAdminSession = res.ok;
+    } catch {
+      isAdminSession = false;
+    }
+    return isAdminSession;
+  }
+
+  async function adminApi(url, method = 'GET', body) {
+    const opts = {
+      method,
+      credentials: 'same-origin',
+      headers: { 'X-Admin-Action': '1' },
+    };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  async function maybeMountAdminYtSearch(container, mode, query, hasLocalResults = false) {
+    const cleanQ = (query || '').trim();
+    if (!container || !cleanQ) return;
+    const ok = await checkAdminSession();
+    if (!ok) return;
+    const activeQ = mode === 'songs' ? (state.songs.q || '').trim() : (state.q || '').trim();
+    if (activeQ !== cleanQ) return;
+    if (container.querySelector('.admin-yt-box')) return;
+
+    const box = document.createElement('div');
+    box.className = 'admin-yt-box';
+    const label = mode === 'songs' ? 'YouTube Songs' : 'YouTube Playlists & Channels';
+    const heading = hasLocalResults
+      ? `Search ${label} for "${escapeHtml(cleanQ)}"`
+      : `No local match for "${escapeHtml(cleanQ)}" — Search ${label}`;
+    box.innerHTML = `
+      <div class="admin-yt-head">
+        <div class="admin-yt-title">
+          <span class="admin-yt-badge">Admin</span>
+          <span>${heading}</span>
+        </div>
+        <button type="button" class="btn-primary admin-yt-search-btn">Search YouTube (~100 quota)</button>
+      </div>
+      <div class="admin-yt-status"></div>
+      <div class="admin-yt-grid"></div>
+    `;
+    if (hasLocalResults) {
+      container.prepend(box);
+    } else {
+      container.appendChild(box);
+    }
+
+    const searchBtn = box.querySelector('.admin-yt-search-btn');
+    const statusNode = box.querySelector('.admin-yt-status');
+    const gridNode = box.querySelector('.admin-yt-grid');
+
+    const setYtStatus = (msg, isErr = false) => {
+      statusNode.textContent = msg || '';
+      statusNode.className = isErr ? 'admin-yt-status error' : 'admin-yt-status';
+    };
+
+    searchBtn.addEventListener('click', async () => {
+      searchBtn.disabled = true;
+      setYtStatus(`Searching YouTube for "${cleanQ}"…`);
+      gridNode.innerHTML = '';
+      try {
+        const data = await adminApi(
+          `/api/admin/youtube/search?mode=${encodeURIComponent(mode)}&q=${encodeURIComponent(cleanQ)}`
+        );
+        const results = data.results || [];
+        if (results.length === 0) {
+          setYtStatus(`No YouTube results found for "${cleanQ}".`);
+          return;
+        }
+        setYtStatus(`Found ${results.length} YouTube result(s). Click Add or Sync to import into AnimaxTube.`);
+
+        for (const r of results) {
+          const card = document.createElement('div');
+          card.className = 'admin-yt-card';
+          const ytUrl =
+            mode === 'songs'
+              ? `https://www.youtube.com/watch?v=${encodeURIComponent(r.id)}`
+              : `https://www.youtube.com/playlist?list=${encodeURIComponent(r.id)}`;
+          const safeThumb = safeUrl(r.thumbnailUrl);
+          card.innerHTML = `
+            ${safeThumb ? `<img class="admin-yt-thumb" src="${escapeHtml(safeThumb)}" alt="" loading="lazy" />` : ''}
+            <div class="admin-yt-body">
+              <a class="admin-yt-item-title" href="${escapeHtml(ytUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title)}</a>
+              <div class="admin-yt-item-ch">${escapeHtml(r.channelTitle || r.channelId)}</div>
+              <div class="admin-yt-actions"></div>
+            </div>
+          `;
+          const actions = card.querySelector('.admin-yt-actions');
+
+          if (mode === 'songs') {
+            const typeSel = document.createElement('select');
+            typeSel.innerHTML = `
+              <option value="op">OP</option>
+              <option value="ed">ED</option>
+              <option value="ost">OST</option>
+            `;
+            typeSel.value = r.suggestedSongType || 'ost';
+            actions.appendChild(typeSel);
+
+            const addSongBtn = document.createElement('button');
+            addSongBtn.type = 'button';
+            addSongBtn.className = 'btn-primary';
+            addSongBtn.textContent = r.alreadyInDb ? 'In DB (Re-sync)' : 'Add Song';
+            addSongBtn.onclick = async () => {
+              addSongBtn.disabled = true;
+              addSongBtn.textContent = 'Adding…';
+              try {
+                await adminApi('/api/admin/youtube/import-song', 'POST', {
+                  videoId: r.id,
+                  title: r.title,
+                  channelId: r.channelId,
+                  channelTitle: r.channelTitle,
+                  songType: typeSel.value,
+                  thumbnailUrl: r.thumbnailUrl,
+                  publishedAt: r.publishedAt,
+                });
+                addSongBtn.textContent = '✓ Added';
+                setYtStatus(`Added "${r.title}" (${typeSel.value.toUpperCase()})! Refreshing songs…`);
+                await loadSongs(false);
+              } catch (err) {
+                addSongBtn.disabled = false;
+                addSongBtn.textContent = 'Add Song';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(addSongBtn);
+
+            const addChBtn = document.createElement('button');
+            addChBtn.type = 'button';
+            addChBtn.className = 'btn-secondary';
+            addChBtn.textContent = 'Add & Sync Channel';
+            addChBtn.onclick = async () => {
+              addChBtn.disabled = true;
+              addChBtn.textContent = 'Syncing…';
+              try {
+                await adminApi('/api/admin/channels', 'POST', {
+                  channel: r.channelId,
+                  force: true,
+                  syncPlaylists: true,
+                  syncVideos: true,
+                });
+                addChBtn.textContent = '✓ Queued';
+                setYtStatus(`Added channel "${r.channelTitle}" and queued background sync.`);
+              } catch (err) {
+                addChBtn.disabled = false;
+                addChBtn.textContent = 'Add & Sync Channel';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(addChBtn);
+          } else {
+            const importPlBtn = document.createElement('button');
+            importPlBtn.type = 'button';
+            importPlBtn.className = 'btn-primary';
+            importPlBtn.textContent = r.playlistInDb ? 'Re-import Playlist' : 'Import Playlist';
+            importPlBtn.onclick = async () => {
+              importPlBtn.disabled = true;
+              importPlBtn.textContent = 'Importing…';
+              try {
+                const out = await adminApi('/api/admin/youtube/import-playlist', 'POST', {
+                  playlistId: r.id,
+                  playlistTitle: r.title,
+                  channelId: r.channelId,
+                  channelTitle: r.channelTitle,
+                  thumbnailUrl: r.thumbnailUrl,
+                });
+                importPlBtn.textContent = `✓ Imported (${out.importedEpisodes})`;
+                setYtStatus(`Imported "${r.title}" (${out.importedEpisodes} videos) from ${out.channelName}! Refreshing…`);
+                await loadInitialMetadata();
+                await loadSeries(false);
+              } catch (err) {
+                importPlBtn.disabled = false;
+                importPlBtn.textContent = 'Import Playlist';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(importPlBtn);
+
+            const syncChBtn = document.createElement('button');
+            syncChBtn.type = 'button';
+            syncChBtn.className = 'btn-secondary';
+            syncChBtn.textContent = r.channelInDb ? 'Sync Channel' : 'Add & Sync Channel';
+            syncChBtn.onclick = async () => {
+              syncChBtn.disabled = true;
+              syncChBtn.textContent = 'Queuing…';
+              try {
+                await adminApi('/api/admin/channels', 'POST', {
+                  channel: r.channelId,
+                  force: true,
+                  syncPlaylists: true,
+                  syncVideos: true,
+                });
+                syncChBtn.textContent = '✓ Sync Queued';
+                setYtStatus(`Channel "${r.channelTitle}" added & background sync queued.`);
+              } catch (err) {
+                syncChBtn.disabled = false;
+                syncChBtn.textContent = r.channelInDb ? 'Sync Channel' : 'Add & Sync Channel';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(syncChBtn);
+          }
+
+          gridNode.appendChild(card);
+        }
+      } catch (err) {
+        setYtStatus(err.message, true);
+      } finally {
+        searchBtn.disabled = false;
+      }
+    });
+  }
 
   const state = {
     view: 'series',
@@ -127,6 +356,21 @@
     },
     saved: loadJson(STORAGE_SAVED, {}),
     history: loadJson(STORAGE_HISTORY, {}),
+    songs: {
+      group: 'tracks',
+      type: 'all',
+      q: '',
+      channelId: '',
+      sort: 'views',
+      page: 1,
+      total: 0,
+      counts: { all: 0, op: 0, ed: 0, ost: 0 },
+      items: [],
+      groups: [],
+      loading: false,
+      loadedOnce: false,
+    },
+    watchReturnView: 'series',
   };
 
   const el = {
@@ -178,12 +422,22 @@
     views: {
       series: document.getElementById('seriesView'),
       calendar: document.getElementById('calendarView'),
+      songs: document.getElementById('songsView'),
       channels: document.getElementById('channelsView'),
       watchlist: document.getElementById('watchlistView'),
       history: document.getElementById('historyView'),
       watch: document.getElementById('watchView'),
       about: document.getElementById('aboutView'),
     },
+    songsTypeChips: document.getElementById('songsTypeChips'),
+    songsLayoutGroup: document.getElementById('songsLayoutGroup'),
+    songsSearchInput: document.getElementById('songsSearchInput'),
+    songsChannelSelect: document.getElementById('songsChannelSelect'),
+    songsSortSelect: document.getElementById('songsSortSelect'),
+    songsCountLine: document.getElementById('songsCountLine'),
+    songsGrid: document.getElementById('songsGrid'),
+    songsPagination: document.getElementById('songsPagination'),
+    songsLoadMoreBtn: document.getElementById('songsLoadMoreBtn'),
     calendarTimezoneBadge: document.getElementById('calendarTimezoneBadge'),
     calPrevWeekBtn: document.getElementById('calPrevWeekBtn'),
     calTodayBtn: document.getElementById('calTodayBtn'),
@@ -459,6 +713,10 @@
     if (view === 'watchlist') renderWatchlist();
     if (view === 'history') renderHistory();
     if (view === 'channels') renderChannelsGrid();
+    if (view === 'songs') {
+      renderSongsChannelOptions();
+      if (!state.songs.loadedOnce) loadSongs(false);
+    }
     if (view === 'calendar') {
       renderCalendarChannelOptions();
       loadCalendar();
@@ -479,6 +737,7 @@
   const VIEW_PATHS = {
     series: '/',
     calendar: '/calendar',
+    songs: '/songs',
     channels: '/channels',
     watchlist: '/watchlist',
     history: '/history',
@@ -526,10 +785,12 @@
     if (state.view === 'about') renderLegalChannels();
     renderSidebarChannels();
     renderCalendarChannelOptions();
+    renderSongsChannelOptions();
     renderDynamicTags();
     renderHomeShelves();
     if (state.view === 'channels') renderChannelsGrid();
     if (state.view === 'calendar') loadCalendar(true);
+    if (state.view === 'songs') loadSongs(false);
   }
 
   function renderSidebarChannels() {
@@ -820,6 +1081,9 @@
       el.seriesGrid.innerHTML = `<div class="empty-state">No series matched your current filters.</div>`;
     } else {
       el.seriesGrid.innerHTML = state.seriesItems.map((it) => renderSeriesCard(it)).join('');
+    }
+    if (state.q) {
+      maybeMountAdminYtSearch(el.seriesGrid, 'anime', state.q, state.seriesItems.length > 0);
     }
     const hasMore = state.seriesItems.length < state.total;
     el.seriesPagination.hidden = !hasMore;
@@ -1277,6 +1541,295 @@
         : `<div class="empty-state">No series in your Watchlist yet. Tap the bookmark icon on any show to save it here.</div>`;
   }
 
+  function renderSongsChannelOptions() {
+    if (!el.songsChannelSelect) return;
+    const prev = state.songs.channelId || '';
+    const opts = ['<option value="">All Channels</option>'];
+    for (const c of state.channels) {
+      opts.push(`<option value="${c.id}">${escapeHtml(c.name)}</option>`);
+    }
+    el.songsChannelSelect.innerHTML = opts.join('');
+    el.songsChannelSelect.value = prev;
+  }
+
+  function formatSongTypeLabel(type) {
+    if (type === 'op') return 'OP';
+    if (type === 'ed') return 'ED';
+    return 'OST';
+  }
+
+  function updateSongTypeChipCounts() {
+    if (!el.songsTypeChips) return;
+    const c = state.songs.counts || { all: 0, op: 0, ed: 0, ost: 0 };
+    el.songsTypeChips.querySelectorAll('[data-count-for]').forEach((node) => {
+      const key = node.dataset.countFor;
+      node.textContent = String(c[key] || 0);
+    });
+    el.songsTypeChips.querySelectorAll('[data-song-type]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.songType === state.songs.type);
+    });
+  }
+
+  async function loadSongs(append = false) {
+    if (!el.songsGrid || state.songs.loading) return;
+    state.songs.loading = true;
+    if (!append) {
+      state.songs.page = 1;
+      el.songsGrid.innerHTML = `<div class="empty-state">Loading anime songs…</div>`;
+    }
+    try {
+      const params = {
+        type: state.songs.type,
+        sort: state.songs.sort,
+        page: String(state.songs.page),
+        limit: String(getPageLimit()),
+      };
+      if (state.songs.group === 'anime') params.group = 'anime';
+      if (state.songs.q) params.q = state.songs.q;
+      if (state.songs.channelId) params.channel = state.songs.channelId;
+
+      const data = await fetchJson(apiUrl('/api/songs', params));
+      state.songs.loadedOnce = true;
+      state.songs.total = data.total || 0;
+      state.songs.counts = data.counts || { all: 0, op: 0, ed: 0, ost: 0 };
+      if (state.songs.group === 'anime') {
+        state.songs.groups = append ? [...state.songs.groups, ...(data.groups || [])] : data.groups || [];
+      } else {
+        state.songs.items = append ? [...state.songs.items, ...(data.items || [])] : data.items || [];
+      }
+      updateSongTypeChipCounts();
+      renderSongsGrid();
+    } catch (err) {
+      el.songsGrid.innerHTML = `<div class="empty-state">Failed to load songs.</div>`;
+    } finally {
+      state.songs.loading = false;
+    }
+  }
+
+  function renderSongsGrid() {
+    if (!el.songsGrid) return;
+    if (state.songs.group === 'anime') {
+      const groups = state.songs.groups;
+      if (el.songsCountLine) {
+        el.songsCountLine.textContent =
+          state.songs.total > 0
+            ? `${state.songs.total.toLocaleString()} anime collection${state.songs.total === 1 ? '' : 's'}`
+            : '0 collections';
+      }
+      if (el.songsPagination) {
+        el.songsPagination.hidden = groups.length >= state.songs.total;
+      }
+      if (groups.length === 0) {
+        el.songsGrid.innerHTML = `<div class="empty-state">No anime song collections found yet. Run "Sync Songs" in the admin portal to index official OP, ED, and OST playlists.</div>`;
+        if (state.songs.q) {
+          maybeMountAdminYtSearch(el.songsGrid, 'songs', state.songs.q, false);
+        }
+        return;
+      }
+      el.songsGrid.innerHTML = groups
+        .map((grp, idx) => {
+          const firstVid = grp.tracks[0]?.youtubeVideoId || '';
+          const thumb =
+            safeUrl(optimizeThumbUrl(grp.thumbnailUrl)) ||
+            (firstVid ? `https://i.ytimg.com/vi/${encodeURIComponent(firstVid)}/mqdefault.jpg` : '');
+          const avatar = safeUrl(grp.channelAvatar);
+          const pills = [
+            grp.opCount > 0 ? `<span class="song-group-pill op">${grp.opCount} OP</span>` : '',
+            grp.edCount > 0 ? `<span class="song-group-pill ed">${grp.edCount} ED</span>` : '',
+            grp.ostCount > 0 ? `<span class="song-group-pill ost">${grp.ostCount} OST</span>` : '',
+          ]
+            .filter(Boolean)
+            .join('');
+          const stats = [formatViews(grp.totalViews), formatRelativeDate(grp.latestPublishedAt)].filter(Boolean).join(' · ');
+          return `
+            <article class="song-card" data-song-group-index="${idx}" tabindex="0" role="button">
+              <div class="song-thumb-wrap">
+                ${thumb ? `<img src="${escapeHtml(thumb)}" alt="" loading="lazy" decoding="async" />` : ''}
+                <span class="song-dur">${grp.trackCount} track${grp.trackCount === 1 ? '' : 's'}</span>
+                ${PLAY_OVERLAY}
+              </div>
+              <div class="song-body">
+                ${avatar ? `<img class="song-ch-avatar" src="${escapeHtml(avatar)}" alt="" loading="lazy" />` : ''}
+                <div class="song-info">
+                  <div class="song-title">${escapeHtml(grp.title)}</div>
+                  <div class="song-channel">${escapeHtml(grp.channelName)}</div>
+                  ${stats ? `<div class="song-stats">${escapeHtml(stats)}</div>` : ''}
+                  ${pills ? `<div class="song-group-pills">${pills}</div>` : ''}
+                </div>
+              </div>
+            </article>
+          `;
+        })
+        .join('');
+      if (state.songs.q) {
+        maybeMountAdminYtSearch(el.songsGrid, 'songs', state.songs.q, true);
+      }
+      return;
+    }
+
+    const items = state.songs.items;
+    if (el.songsCountLine) {
+      el.songsCountLine.textContent =
+        state.songs.total > 0
+          ? `${state.songs.total.toLocaleString()} song${state.songs.total === 1 ? '' : 's'}`
+          : '0 songs';
+    }
+    if (el.songsPagination) {
+      el.songsPagination.hidden = items.length >= state.songs.total;
+    }
+    if (items.length === 0) {
+      el.songsGrid.innerHTML = `<div class="empty-state">No anime songs (OP, ED, OST) found yet. Run a channel sync to index official music playlists &amp; theme songs.</div>`;
+      if (state.songs.q) {
+        maybeMountAdminYtSearch(el.songsGrid, 'songs', state.songs.q, false);
+      }
+      return;
+    }
+
+    el.songsGrid.innerHTML = items
+      .map((song, idx) => {
+        const thumb = safeUrl(optimizeThumbUrl(song.thumbnailUrl)) || `https://i.ytimg.com/vi/${encodeURIComponent(song.youtubeVideoId)}/mqdefault.jpg`;
+        const avatar = safeUrl(song.channelAvatar);
+        const dur = formatDuration(song.durationIso);
+        const typeLbl = formatSongTypeLabel(song.songType);
+        const stats = [formatViews(song.viewCount), formatRelativeDate(song.publishedAt)].filter(Boolean).join(' · ');
+        return `
+          <article class="song-card" data-song-index="${idx}" tabindex="0" role="button">
+            <div class="song-thumb-wrap">
+              <img src="${escapeHtml(thumb)}" alt="" loading="lazy" decoding="async" />
+              <span class="song-type-badge ${escapeHtml(song.songType)}">${typeLbl}</span>
+              ${dur ? `<span class="song-dur">${escapeHtml(dur)}</span>` : ''}
+              ${PLAY_OVERLAY}
+            </div>
+            <div class="song-body">
+              ${avatar ? `<img class="song-ch-avatar" src="${escapeHtml(avatar)}" alt="" loading="lazy" />` : ''}
+              <div class="song-info">
+                <div class="song-title">${escapeHtml(song.title)}</div>
+                <div class="song-channel">${escapeHtml(song.channelName)}</div>
+                ${stats ? `<div class="song-stats">${escapeHtml(stats)}</div>` : ''}
+              </div>
+            </div>
+          </article>
+        `;
+      })
+      .join('');
+    if (state.songs.q) {
+      maybeMountAdminYtSearch(el.songsGrid, 'songs', state.songs.q, true);
+    }
+  }
+
+  function openSongGroupWatch(groupIndex) {
+    const grp = state.songs.groups[groupIndex];
+    if (!grp || !grp.tracks || grp.tracks.length === 0) return;
+    state.watchReturnView = 'songs';
+    state.watch = { songList: grp.tracks, activeSongIndex: 0 };
+    el.episodeQueuePanel.hidden = false;
+    el.saveSeriesBtn.hidden = true;
+    switchView('watch');
+    playActiveSong();
+  }
+
+  function openSongWatch(songIndex) {
+    const items = state.songs.items;
+    if (!items || !items[songIndex]) return;
+    state.watchReturnView = 'songs';
+    state.watch = { songList: items, activeSongIndex: songIndex };
+    el.episodeQueuePanel.hidden = false;
+    el.saveSeriesBtn.hidden = true;
+    switchView('watch');
+    playActiveSong();
+  }
+
+  function playActiveSong() {
+    const w = state.watch;
+    if (!w || !w.songList) return;
+    const song = w.songList[w.activeSongIndex];
+    if (!song) return;
+
+    const typeLbl = formatSongTypeLabel(song.songType);
+    setDocumentTitle(`${song.title} (${typeLbl}) — ${song.channelName} | AnimaxTube`);
+    el.watchSeriesTitle.textContent = song.animeTitle || `${typeLbl} · Anime Music`;
+    el.watchEpisodeTitle.textContent = song.title;
+
+    const avatar = safeUrl(song.channelAvatar);
+    const chUrl = safeUrl(song.channelUrl);
+    el.watchChannelMeta.innerHTML = `
+      ${avatar ? `<img src="${escapeHtml(avatar)}" alt="" />` : ''}
+      <div>
+        <div style="font-weight:700;font-size:0.96rem">${escapeHtml(song.channelName)} <span class="verified-icon">✓</span></div>
+        ${chUrl ? `<div style="font-size:0.78rem;color:var(--text-muted)"><a href="${escapeHtml(chUrl)}" target="_blank" rel="noopener noreferrer">Open channel on YouTube ↗</a></div>` : ''}
+      </div>
+    `;
+    el.watchLikePill.textContent = song.likeCount ? `${formatCompact(song.likeCount)} likes` : typeLbl;
+    el.watchViewPill.textContent = song.viewCount ? `${formatCompact(song.viewCount)} views` : 'Official Music';
+    el.sourceSwitcher.innerHTML = `<span class="ch-pill">${typeLbl}</span>`;
+
+    const descStats = [
+      song.viewCount ? `${song.viewCount.toLocaleString()} views` : null,
+      song.publishedAt ? `Uploaded ${formatFullDate(song.publishedAt)}` : null,
+    ].filter(Boolean);
+    el.watchDescStats.textContent = descStats.join(' · ') || 'Official Anime Music';
+    el.watchDescTags.innerHTML = '';
+    el.watchSynopsis.textContent = song.playlistTitle
+      ? `From official playlist: ${song.playlistTitle}`
+      : `Official anime ${typeLbl} published by ${song.channelName}.`;
+    el.watchEpDescription.hidden = true;
+    el.watchBuzzQuote.hidden = true;
+
+    const queueTitle = el.episodeQueuePanel?.querySelector('.queue-title');
+    if (queueTitle) queueTitle.textContent = 'Songs Queue';
+    el.queueSubInfo.textContent = `${w.activeSongIndex + 1} / ${w.songList.length} · ${typeLbl}`;
+
+    el.episodeList.innerHTML = w.songList
+      .map((item, idx) => {
+        const active = idx === w.activeSongIndex ? ' active' : '';
+        const dur = formatDuration(item.durationIso);
+        const thumb = safeUrl(optimizeThumbUrl(item.thumbnailUrl)) || `https://i.ytimg.com/vi/${encodeURIComponent(item.youtubeVideoId)}/mqdefault.jpg`;
+        const subStats = [item.channelName, formatViews(item.viewCount)].filter(Boolean).join(' · ');
+        return `
+          <button class="ep-item${active}" data-song-queue-index="${idx}">
+            <div class="ep-thumb-wrap">
+              <img src="${escapeHtml(thumb)}" alt="" loading="lazy" decoding="async" />
+              ${dur ? `<span class="ep-dur">${escapeHtml(dur)}</span>` : ''}
+            </div>
+            <div class="ep-meta">
+              <div class="ep-num">${formatSongTypeLabel(item.songType)}</div>
+              <div class="ep-title">${escapeHtml(item.title)}</div>
+              ${subStats ? `<div class="ep-substats">${escapeHtml(subStats)}</div>` : ''}
+            </div>
+          </button>
+        `;
+      })
+      .join('');
+
+    const playlistUrl = song.playlistId ? `https://www.youtube.com/playlist?list=${encodeURIComponent(song.playlistId)}` : '';
+    const geo = { regionAllowed: song.regionAllowed, regionBlocked: song.regionBlocked, regionFocus: song.regionFocus };
+    const locked = getGeoLock(geo);
+    renderLicensorBanner({
+      channelName: song.channelName,
+      channelUrl: song.channelUrl,
+      playlistUrl,
+      videoId: song.youtubeVideoId,
+      locked,
+      geo,
+    });
+    if (locked) {
+      showGeoLockCard({
+        title: song.title,
+        channelName: song.channelName,
+        officialUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(song.youtubeVideoId)}`,
+        geo,
+      });
+      return;
+    }
+    showPlayerFrame();
+    window.AnimaxPlayer.playVideo('ytPlayerMount', song.youtubeVideoId, () => {
+      if (el.autoNextCheckbox.checked && w.activeSongIndex < w.songList.length - 1) {
+        w.activeSongIndex += 1;
+        playActiveSong();
+      }
+    });
+  }
+
   function renderHistory() {
     const historyList = getHistoryList();
     if (el.clearHistoryBtn) {
@@ -1637,7 +2190,10 @@
       : 0;
     if (activeIndex < 0) activeIndex = 0;
 
+    state.watchReturnView = 'series';
     state.watch = { detail, activeSourceId, activeEpisodeIndex: activeIndex };
+    const queueTitle = el.episodeQueuePanel?.querySelector('.queue-title');
+    if (queueTitle) queueTitle.textContent = 'Episodes';
     el.episodeQueuePanel.hidden = false;
     el.saveSeriesBtn.hidden = false;
 
@@ -1865,6 +2421,8 @@
       openSeriesWatch(decodeURIComponent(pathname.slice('/watch/'.length)), preferredVideoId);
     } else if (pathname === '/calendar') {
       switchView('calendar');
+    } else if (pathname === '/songs') {
+      switchView('songs');
     } else if (pathname === '/channels') {
       switchView('channels');
     } else if (pathname === '/watchlist') {
@@ -2271,8 +2829,9 @@
     });
 
     el.backToBrowseBtn.addEventListener('click', () => {
-      switchView('series');
-      history.pushState({}, '', '/');
+      const targetView = state.watchReturnView === 'songs' ? 'songs' : 'series';
+      switchView(targetView);
+      history.pushState({}, '', VIEW_PATHS[targetView] || '/');
     });
 
     el.saveSeriesBtn.addEventListener('click', () => {
@@ -2300,11 +2859,94 @@
     });
 
     el.episodeList.addEventListener('click', (e) => {
+      const songBtn = e.target.closest('[data-song-queue-index]');
+      if (songBtn && state.watch?.songList) {
+        state.watch.activeSongIndex = parseInt(songBtn.dataset.songQueueIndex, 10);
+        playActiveSong();
+        return;
+      }
       const btn = e.target.closest('[data-ep-index]');
       if (!btn || !state.watch?.detail) return;
       state.watch.activeEpisodeIndex = parseInt(btn.dataset.epIndex, 10);
       playActiveEpisode();
     });
+
+    if (el.songsTypeChips) {
+      el.songsTypeChips.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-song-type]');
+        if (!btn) return;
+        state.songs.type = btn.dataset.songType || 'all';
+        updateSongTypeChipCounts();
+        loadSongs(false);
+      });
+    }
+    if (el.songsSearchInput) {
+      let songSearchTimer = null;
+      el.songsSearchInput.addEventListener('input', () => {
+        clearTimeout(songSearchTimer);
+        songSearchTimer = setTimeout(() => {
+          state.songs.q = el.songsSearchInput.value.trim();
+          loadSongs(false);
+        }, 250);
+      });
+    }
+    if (el.songsChannelSelect) {
+      el.songsChannelSelect.addEventListener('change', () => {
+        state.songs.channelId = el.songsChannelSelect.value;
+        loadSongs(false);
+      });
+    }
+    if (el.songsSortSelect) {
+      el.songsSortSelect.addEventListener('change', () => {
+        state.songs.sort = el.songsSortSelect.value;
+        loadSongs(false);
+      });
+    }
+    if (el.songsLoadMoreBtn) {
+      el.songsLoadMoreBtn.addEventListener('click', () => {
+        if (state.songs.loading) return;
+        state.songs.page += 1;
+        loadSongs(true);
+      });
+    }
+    if (el.songsLayoutGroup) {
+      el.songsLayoutGroup.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-songs-group]');
+        if (!btn) return;
+        const nextGroup = btn.dataset.songsGroup === 'anime' ? 'anime' : 'tracks';
+        if (state.songs.group === nextGroup) return;
+        state.songs.group = nextGroup;
+        el.songsLayoutGroup.querySelectorAll('[data-songs-group]').forEach((b) => {
+          b.classList.toggle('active', b === btn);
+        });
+        loadSongs(false);
+      });
+    }
+    if (el.songsGrid) {
+      el.songsGrid.addEventListener('click', (e) => {
+        const groupCard = e.target.closest('.song-card[data-song-group-index]');
+        if (groupCard) {
+          openSongGroupWatch(parseInt(groupCard.dataset.songGroupIndex, 10));
+          return;
+        }
+        const card = e.target.closest('.song-card[data-song-index]');
+        if (!card) return;
+        openSongWatch(parseInt(card.dataset.songIndex, 10));
+      });
+      el.songsGrid.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const groupCard = e.target.closest('.song-card[data-song-group-index]');
+        if (groupCard) {
+          e.preventDefault();
+          openSongGroupWatch(parseInt(groupCard.dataset.songGroupIndex, 10));
+          return;
+        }
+        const card = e.target.closest('.song-card[data-song-index]');
+        if (!card) return;
+        e.preventDefault();
+        openSongWatch(parseInt(card.dataset.songIndex, 10));
+      });
+    }
 
     window.addEventListener('popstate', () => {
       applyRouteFromUrl(window.location.pathname);

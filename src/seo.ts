@@ -104,6 +104,15 @@ export function buildPageMeta(db: DatabaseSync, pathname: string): PageMeta {
       ogType: 'website',
     };
   }
+  if (pathname === '/songs') {
+    return {
+      title: `Anime Songs — Official OP, ED & OST on YouTube | ${SITE_NAME}`,
+      description:
+        'Listen to official anime openings (OP), endings (ED), and soundtracks (OST) published on licensed YouTube channels.',
+      canonicalPath: '/songs',
+      ogType: 'website',
+    };
+  }
   return {
     title: DEFAULT_TITLE,
     description: DEFAULT_DESCRIPTION,

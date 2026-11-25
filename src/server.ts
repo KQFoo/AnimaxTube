@@ -16,6 +16,8 @@ import {
   queryLiveStreams,
   querySeriesDetail,
   querySeriesList,
+  querySongGroups,
+  querySongsList,
   queryTopTags,
 } from './db/index.ts';
 import { queryCalendar } from './db/calendar.ts';
@@ -170,6 +172,23 @@ export function createApp(dbPath?: string, opts: AppOptions = {}) {
   app.get('/api/live', (c) => {
     const region = c.req.query('region') || null;
     return c.json({ streams: queryLiveStreams(db, region) });
+  });
+
+  app.get('/api/songs', (c) => {
+    const typeRaw = c.req.query('type');
+    const type = typeRaw === 'op' || typeRaw === 'ed' || typeRaw === 'ost' ? typeRaw : 'all';
+    const q = c.req.query('q')?.slice(0, 120) || undefined;
+    const channelRaw = c.req.query('channel');
+    const channelId = channelRaw ? parseInt(channelRaw, 10) || undefined : undefined;
+    const region = c.req.query('region') || null;
+    const sortRaw = c.req.query('sort');
+    const sort = sortRaw === 'recent' || sortRaw === 'az' ? sortRaw : 'views';
+    const page = clampInt(c.req.query('page'), 1, 1, 10_000);
+    const limit = clampInt(c.req.query('limit'), 36, 1, 100);
+    if (c.req.query('group') === 'anime') {
+      return c.json(querySongGroups(db, { type, q, channelId, region, sort, page, limit }));
+    }
+    return c.json(querySongsList(db, { type, q, channelId, region, sort, page, limit }));
   });
 
   app.get('/api/calendar', (c) => {

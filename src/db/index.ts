@@ -8,7 +8,14 @@ import {
   type EpisodeRow,
   type LiveStreamRow,
   type SeriesRow,
+  type SongRow,
 } from './schema.ts';
+import {
+  getNextQuotaResetUnix,
+  getYouTubeApiKeys,
+  getYouTubeQuotaDayKey,
+  setQuotaRecorder,
+} from '../lib/youtube.ts';
 
 let cachedDb: DatabaseSync | null = null;
 let cachedPath: string | null = null;
@@ -52,6 +59,10 @@ function migrateExistingSchema(db: DatabaseSync): void {
   ensureColumn(db, 'episodes', 'unlocked_at', 'INTEGER');
   ensureColumn(db, 'episodes', 'expires_at', 'INTEGER');
 
+  // Channel sync preference columns
+  ensureColumn(db, 'channels', 'sync_playlists', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'channels', 'sync_videos', 'INTEGER NOT NULL DEFAULT 1');
+
   // Channel series incremental sync tracking
   ensureColumn(db, 'channel_series', 'playlist_item_count', 'INTEGER');
 
@@ -93,16 +104,61 @@ export function openDatabase(dbPath = getDbPath()): DatabaseSync {
   db.exec(SCHEMA_SQL);
   cachedDb = db;
   cachedPath = dbPath;
+  setQuotaRecorder((units) => recordYouTubeQuotaUnits(db, units));
   return db;
 }
 
 export function closeDatabase(): void {
+  setQuotaRecorder(null);
   channelGeoCache.clear();
   if (cachedDb) {
     cachedDb.close();
     cachedDb = null;
     cachedPath = null;
   }
+}
+
+export interface YouTubeQuotaStatus {
+  dayKey: string;
+  keyCount: number;
+  perKeyLimit: number;
+  dailyLimit: number;
+  usedToday: number;
+  remaining: number;
+  resetAt: number;
+}
+
+export function recordYouTubeQuotaUnits(db: DatabaseSync, units: number, now = new Date()): void {
+  if (!Number.isFinite(units) || units <= 0) return;
+  const key = `yt_quota_used:${getYouTubeQuotaDayKey(now)}`;
+  db.prepare(
+    'INSERT INTO cache_flags (key, dirty) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET dirty = dirty + excluded.dirty'
+  ).run(key, Math.round(units));
+}
+
+export function getYouTubeQuotaStatus(db: DatabaseSync, now = new Date()): YouTubeQuotaStatus {
+  let keyCount = 0;
+  try {
+    keyCount = getYouTubeApiKeys().length;
+  } catch {
+    keyCount = 0;
+  }
+  const perKeyLimit = Math.max(1000, parseInt(process.env.YOUTUBE_DAILY_QUOTA_PER_KEY || '10000', 10) || 10000);
+  const dailyLimit = keyCount * perKeyLimit;
+  const dayKey = getYouTubeQuotaDayKey(now);
+  const row = db
+    .prepare('SELECT dirty FROM cache_flags WHERE key = ? LIMIT 1')
+    .get(`yt_quota_used:${dayKey}`) as { dirty: number } | undefined;
+  const usedToday = Math.max(0, row?.dirty || 0);
+  return {
+    dayKey,
+    keyCount,
+    perKeyLimit,
+    dailyLimit,
+    usedToday,
+    remaining: Math.max(0, dailyLimit - usedToday),
+    resetAt: getNextQuotaResetUnix(now),
+  };
 }
 
 export function parseJsonArray(raw: string | null | undefined): string[] {
@@ -497,6 +553,264 @@ export function rebuildAllFts(db: DatabaseSync): void {
   for (const r of rows) {
     upsertSeriesFts(db, r.id);
   }
+}
+
+export interface DeleteChannelResult {
+  id: number;
+  youtubeChannelId: string;
+  name: string;
+  deletedEpisodes: number;
+  removedSeriesCount: number;
+  updatedSeriesCount: number;
+}
+
+/**
+ * Permanently removes a channel and all of its cascaded playlists, videos/episodes,
+ * live streams, and locked watch entries. Any series left with no remaining episodes
+ * or playlists are also removed; shared series have their stats & FTS refreshed.
+ */
+export function deleteChannelAndCleanup(db: DatabaseSync, channelId: number): DeleteChannelResult | null {
+  const ch = db
+    .prepare('SELECT id, youtube_channel_id, name FROM channels WHERE id = ? LIMIT 1')
+    .get(channelId) as { id: number; youtube_channel_id: string; name: string } | undefined;
+  if (!ch) return null;
+
+  const epCountRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM episodes WHERE channel_id = ?')
+    .get(channelId) as { cnt: number };
+  const deletedEpisodes = epCountRow?.cnt || 0;
+
+  const affectedSeriesRows = db
+    .prepare(
+      `SELECT DISTINCT series_id FROM channel_series WHERE channel_id = ?
+       UNION
+       SELECT DISTINCT series_id FROM episodes WHERE channel_id = ?`
+    )
+    .all(channelId, channelId) as unknown as Array<{ series_id: number }>;
+  const affectedSeriesIds = affectedSeriesRows.map((r) => r.series_id);
+
+  let removedSeriesCount = 0;
+  let updatedSeriesCount = 0;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare('DELETE FROM channels WHERE id = ?').run(channelId);
+
+    const checkRemaining = db.prepare(
+      `SELECT (SELECT COUNT(*) FROM channel_series WHERE series_id = ?) AS cs_cnt,
+              (SELECT COUNT(*) FROM episodes WHERE series_id = ?) AS ep_cnt`
+    );
+    const deleteSeriesFts = db.prepare('DELETE FROM series_fts WHERE series_id = ?');
+    const deleteSeries = db.prepare('DELETE FROM series WHERE id = ?');
+
+    for (const sid of affectedSeriesIds) {
+      const rem = checkRemaining.get(sid, sid) as { cs_cnt: number; ep_cnt: number };
+      if ((rem?.cs_cnt || 0) === 0 && (rem?.ep_cnt || 0) === 0) {
+        deleteSeriesFts.run(sid);
+        deleteSeries.run(sid);
+        removedSeriesCount++;
+      } else {
+        refreshSeriesStats(db, sid);
+        updatedSeriesCount++;
+      }
+    }
+
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('regions', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('tags', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  channelGeoCache.clear();
+  return {
+    id: ch.id,
+    youtubeChannelId: ch.youtube_channel_id,
+    name: ch.name,
+    deletedEpisodes,
+    removedSeriesCount,
+    updatedSeriesCount,
+  };
+}
+
+export interface DeletePlaylistResult {
+  id: number;
+  channelId: number;
+  playlistId: string;
+  playlistTitle: string;
+  deletedEpisodes: number;
+  removedSeries: boolean;
+}
+
+/**
+ * Permanently removes a specific playlist (`channel_series`) and all of its videos
+ * from a channel. Removes the parent `series` if orphaned, otherwise refreshes stats.
+ */
+export function deletePlaylistAndCleanup(
+  db: DatabaseSync,
+  channelId: number,
+  channelSeriesId: number
+): DeletePlaylistResult | null {
+  const cs = db
+    .prepare(
+      'SELECT id, channel_id, series_id, playlist_id, playlist_title FROM channel_series WHERE id = ? AND channel_id = ? LIMIT 1'
+    )
+    .get(channelSeriesId, channelId) as
+    | { id: number; channel_id: number; series_id: number; playlist_id: string; playlist_title: string }
+    | undefined;
+  if (!cs) return null;
+
+  const epCountRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM episodes WHERE channel_series_id = ?')
+    .get(channelSeriesId) as { cnt: number };
+  const deletedEpisodes = epCountRow?.cnt || 0;
+
+  let removedSeries = false;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare('DELETE FROM channel_series WHERE id = ?').run(channelSeriesId);
+
+    const rem = db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM channel_series WHERE series_id = ?) AS cs_cnt,
+                (SELECT COUNT(*) FROM episodes WHERE series_id = ?) AS ep_cnt`
+      )
+      .get(cs.series_id, cs.series_id) as { cs_cnt: number; ep_cnt: number };
+
+    if ((rem?.cs_cnt || 0) === 0 && (rem?.ep_cnt || 0) === 0) {
+      db.prepare('DELETE FROM series_fts WHERE series_id = ?').run(cs.series_id);
+      db.prepare('DELETE FROM series WHERE id = ?').run(cs.series_id);
+      removedSeries = true;
+    } else {
+      refreshSeriesStats(db, cs.series_id);
+    }
+
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('regions', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('tags', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  channelGeoCache.clear();
+  return {
+    id: cs.id,
+    channelId: cs.channel_id,
+    playlistId: cs.playlist_id,
+    playlistTitle: cs.playlist_title,
+    deletedEpisodes,
+    removedSeries,
+  };
+}
+
+export interface DeleteEpisodeResult {
+  id: number;
+  channelId: number;
+  youtubeVideoId: string;
+  title: string;
+  removedPlaylist: boolean;
+  removedSeries: boolean;
+}
+
+/**
+ * Permanently removes a specific video (`episodes` row) from a channel.
+ * Updates its playlist's episode count (or deletes the playlist if now empty),
+ * and refreshes or deletes the parent `series` accordingly.
+ */
+export function deleteEpisodeAndCleanup(
+  db: DatabaseSync,
+  channelId: number,
+  episodeId: number
+): DeleteEpisodeResult | null {
+  const ep = db
+    .prepare(
+      'SELECT id, channel_id, channel_series_id, series_id, youtube_video_id, title FROM episodes WHERE id = ? AND channel_id = ? LIMIT 1'
+    )
+    .get(episodeId, channelId) as
+    | {
+        id: number;
+        channel_id: number;
+        channel_series_id: number;
+        series_id: number;
+        youtube_video_id: string;
+        title: string;
+      }
+    | undefined;
+  if (!ep) return null;
+
+  let removedPlaylist = false;
+  let removedSeries = false;
+
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    db.prepare('DELETE FROM episodes WHERE id = ?').run(episodeId);
+
+    const plCounts = db
+      .prepare(
+        `SELECT COUNT(*) AS total_cnt,
+                SUM(CASE WHEN is_members_only = 0 THEN 1 ELSE 0 END) AS free_cnt
+         FROM episodes
+         WHERE channel_series_id = ?`
+      )
+      .get(ep.channel_series_id) as { total_cnt: number; free_cnt: number | null };
+
+    if ((plCounts?.total_cnt || 0) === 0) {
+      db.prepare('DELETE FROM channel_series WHERE id = ?').run(ep.channel_series_id);
+      removedPlaylist = true;
+    } else {
+      db.prepare('UPDATE channel_series SET episode_count = ? WHERE id = ?').run(
+        plCounts?.free_cnt || 0,
+        ep.channel_series_id
+      );
+    }
+
+    const rem = db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM channel_series WHERE series_id = ?) AS cs_cnt,
+                (SELECT COUNT(*) FROM episodes WHERE series_id = ?) AS ep_cnt`
+      )
+      .get(ep.series_id, ep.series_id) as { cs_cnt: number; ep_cnt: number };
+
+    if ((rem?.cs_cnt || 0) === 0 && (rem?.ep_cnt || 0) === 0) {
+      db.prepare('DELETE FROM series_fts WHERE series_id = ?').run(ep.series_id);
+      db.prepare('DELETE FROM series WHERE id = ?').run(ep.series_id);
+      removedSeries = true;
+    } else {
+      refreshSeriesStats(db, ep.series_id);
+    }
+
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('regions', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.prepare(
+      "INSERT INTO cache_flags (key, dirty) VALUES ('tags', 1) ON CONFLICT(key) DO UPDATE SET dirty = 1"
+    ).run();
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  channelGeoCache.clear();
+  return {
+    id: ep.id,
+    channelId: ep.channel_id,
+    youtubeVideoId: ep.youtube_video_id,
+    title: ep.title,
+    removedPlaylist,
+    removedSeries,
+  };
 }
 
 export interface SeriesListItem {
@@ -1070,4 +1384,355 @@ export function queryLiveStreams(db: DatabaseSync, rawRegion?: string | null) {
       region_focus: string | null;
     }
   >;
+}
+
+export interface SongListItem {
+  id: number;
+  channelId: number;
+  channelName: string;
+  channelAvatar: string | null;
+  channelUrl: string;
+  regionFocus: string | null;
+  seriesId: number | null;
+  seriesSlug: string | null;
+  seriesTitle: string | null;
+  youtubeVideoId: string;
+  playlistId: string | null;
+  playlistTitle: string | null;
+  title: string;
+  songType: 'op' | 'ed' | 'ost';
+  animeTitle: string | null;
+  durationIso: string | null;
+  thumbnailUrl: string | null;
+  publishedAt: number | null;
+  viewCount: number;
+  likeCount: number;
+  regionAllowed: string[];
+  regionBlocked: string[];
+}
+
+export function querySongsList(
+  db: DatabaseSync,
+  opts: {
+    type?: 'all' | 'op' | 'ed' | 'ost';
+    q?: string;
+    channelId?: number;
+    region?: string | null;
+    sort?: 'views' | 'recent' | 'az';
+    page?: number;
+    limit?: number;
+  } = {}
+): {
+  items: SongListItem[];
+  total: number;
+  page: number;
+  limit: number;
+  counts: { all: number; op: number; ed: number; ost: number };
+} {
+  const page = Math.max(1, opts.page || 1);
+  const limit = Math.min(100, Math.max(1, opts.limit || 36));
+  const offset = (page - 1) * limit;
+  const region = normalizeRegionCode(opts.region);
+  const geoSg = buildLiveGeoSql(db, 'sg', region);
+
+  const baseWhere: string[] = ['c.is_verified = 1', geoSg.sql];
+  const baseParams: Array<string | number> = [...geoSg.params];
+
+  if (opts.channelId) {
+    baseWhere.push('sg.channel_id = ?');
+    baseParams.push(opts.channelId);
+  }
+  if (opts.q && opts.q.trim()) {
+    const like = `%${opts.q.trim()}%`;
+    baseWhere.push(
+      "(sg.title LIKE ? OR COALESCE(sg.anime_title, '') LIKE ? OR COALESCE(sg.playlist_title, '') LIKE ? OR c.name LIKE ?)"
+    );
+    baseParams.push(like, like, like, like);
+  }
+
+  const baseWhereSql = baseWhere.join(' AND ');
+  const countRows = db
+    .prepare(
+      `SELECT sg.song_type, COUNT(*) AS cnt
+       FROM songs sg
+       JOIN channels c ON c.id = sg.channel_id
+       WHERE ${baseWhereSql}
+       GROUP BY sg.song_type`
+    )
+    .all(...baseParams) as unknown as Array<{ song_type: string; cnt: number }>;
+
+  const counts = { all: 0, op: 0, ed: 0, ost: 0 };
+  for (const r of countRows) {
+    if (r.song_type === 'op') counts.op = r.cnt;
+    else if (r.song_type === 'ed') counts.ed = r.cnt;
+    else counts.ost += r.cnt;
+    counts.all += r.cnt;
+  }
+
+  const where = [...baseWhere];
+  const params = [...baseParams];
+  if (opts.type && opts.type !== 'all') {
+    where.push('sg.song_type = ?');
+    params.push(opts.type);
+  }
+
+  const whereSql = where.join(' AND ');
+  const total =
+    opts.type && opts.type !== 'all'
+      ? opts.type === 'op'
+        ? counts.op
+        : opts.type === 'ed'
+          ? counts.ed
+          : counts.ost
+      : counts.all;
+
+  const orderClause =
+    opts.sort === 'recent'
+      ? 'ORDER BY COALESCE(sg.published_at, sg.created_at) DESC, COALESCE(sg.view_count, 0) DESC'
+      : opts.sort === 'az'
+        ? 'ORDER BY sg.title COLLATE NOCASE ASC'
+        : 'ORDER BY COALESCE(sg.view_count, 0) DESC, COALESCE(sg.published_at, sg.created_at) DESC';
+
+  const rows = db
+    .prepare(
+      `SELECT sg.*, c.name AS channel_name, c.avatar_url AS channel_avatar, c.url AS channel_url,
+              c.region_focus, s.slug AS series_slug, s.canonical_title AS series_title
+       FROM songs sg
+       JOIN channels c ON c.id = sg.channel_id
+       LEFT JOIN series s ON s.id = sg.series_id
+       WHERE ${whereSql}
+       ${orderClause}
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as unknown as Array<
+    SongRow & {
+      channel_name: string;
+      channel_avatar: string | null;
+      channel_url: string;
+      region_focus: string | null;
+      series_slug: string | null;
+      series_title: string | null;
+    }
+  >;
+
+  const items: SongListItem[] = rows.map((r) => ({
+    id: r.id,
+    channelId: r.channel_id,
+    channelName: r.channel_name,
+    channelAvatar: r.channel_avatar,
+    channelUrl: r.channel_url,
+    regionFocus: r.region_focus,
+    seriesId: r.series_id,
+    seriesSlug: r.series_slug,
+    seriesTitle: r.series_title,
+    youtubeVideoId: r.youtube_video_id,
+    playlistId: r.playlist_id,
+    playlistTitle: r.playlist_title,
+    title: r.title,
+    songType: r.song_type === 'op' || r.song_type === 'ed' ? r.song_type : 'ost',
+    animeTitle: r.anime_title,
+    durationIso: r.duration_iso,
+    thumbnailUrl: r.thumbnail_url,
+    publishedAt: r.published_at,
+    viewCount: r.view_count || 0,
+    likeCount: r.like_count || 0,
+    regionAllowed: parseJsonArray(r.region_allowed),
+    regionBlocked: parseJsonArray(r.region_blocked),
+  }));
+
+  return { items, total, page, limit, counts };
+}
+
+export interface SongGroupItem {
+  groupKey: string;
+  title: string;
+  seriesSlug: string | null;
+  thumbnailUrl: string | null;
+  channelName: string;
+  channelAvatar: string | null;
+  trackCount: number;
+  opCount: number;
+  edCount: number;
+  ostCount: number;
+  totalViews: number;
+  latestPublishedAt: number | null;
+  tracks: SongListItem[];
+}
+
+export function querySongGroups(
+  db: DatabaseSync,
+  opts: {
+    type?: 'all' | 'op' | 'ed' | 'ost';
+    q?: string;
+    channelId?: number;
+    region?: string | null;
+    sort?: 'views' | 'recent' | 'az';
+    page?: number;
+    limit?: number;
+  } = {}
+): {
+  groups: SongGroupItem[];
+  total: number;
+  page: number;
+  limit: number;
+  counts: { all: number; op: number; ed: number; ost: number };
+} {
+  const page = Math.max(1, opts.page || 1);
+  const limit = Math.min(100, Math.max(1, opts.limit || 24));
+  const region = normalizeRegionCode(opts.region);
+  const geoSg = buildLiveGeoSql(db, 'sg', region);
+
+  const baseWhere: string[] = ['c.is_verified = 1', geoSg.sql];
+  const baseParams: Array<string | number> = [...geoSg.params];
+
+  if (opts.channelId) {
+    baseWhere.push('sg.channel_id = ?');
+    baseParams.push(opts.channelId);
+  }
+  if (opts.q && opts.q.trim()) {
+    const like = `%${opts.q.trim()}%`;
+    baseWhere.push(
+      "(sg.title LIKE ? OR COALESCE(sg.anime_title, '') LIKE ? OR COALESCE(sg.playlist_title, '') LIKE ? OR c.name LIKE ?)"
+    );
+    baseParams.push(like, like, like, like);
+  }
+
+  const baseWhereSql = baseWhere.join(' AND ');
+  const countRows = db
+    .prepare(
+      `SELECT sg.song_type, COUNT(*) AS cnt
+       FROM songs sg
+       JOIN channels c ON c.id = sg.channel_id
+       WHERE ${baseWhereSql}
+       GROUP BY sg.song_type`
+    )
+    .all(...baseParams) as unknown as Array<{ song_type: string; cnt: number }>;
+
+  const counts = { all: 0, op: 0, ed: 0, ost: 0 };
+  for (const r of countRows) {
+    if (r.song_type === 'op') counts.op = r.cnt;
+    else if (r.song_type === 'ed') counts.ed = r.cnt;
+    else counts.ost += r.cnt;
+    counts.all += r.cnt;
+  }
+
+  const where = [...baseWhere];
+  const params = [...baseParams];
+  if (opts.type && opts.type !== 'all') {
+    where.push('sg.song_type = ?');
+    params.push(opts.type);
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT sg.*, c.name AS channel_name, c.avatar_url AS channel_avatar, c.url AS channel_url,
+              c.region_focus, s.slug AS series_slug, s.canonical_title AS series_title, s.poster_url AS series_poster
+       FROM songs sg
+       JOIN channels c ON c.id = sg.channel_id
+       LEFT JOIN series s ON s.id = sg.series_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY COALESCE(sg.view_count, 0) DESC, COALESCE(sg.published_at, sg.created_at) DESC
+       LIMIT 1500`
+    )
+    .all(...params) as unknown as Array<
+    SongRow & {
+      channel_name: string;
+      channel_avatar: string | null;
+      channel_url: string;
+      region_focus: string | null;
+      series_slug: string | null;
+      series_title: string | null;
+      series_poster: string | null;
+    }
+  >;
+
+  const groupMap = new Map<string, SongGroupItem>();
+  for (const r of rows) {
+    const songType: 'op' | 'ed' | 'ost' = r.song_type === 'op' || r.song_type === 'ed' ? r.song_type : 'ost';
+    const item: SongListItem = {
+      id: r.id,
+      channelId: r.channel_id,
+      channelName: r.channel_name,
+      channelAvatar: r.channel_avatar,
+      channelUrl: r.channel_url,
+      regionFocus: r.region_focus,
+      seriesId: r.series_id,
+      seriesSlug: r.series_slug,
+      seriesTitle: r.series_title,
+      youtubeVideoId: r.youtube_video_id,
+      playlistId: r.playlist_id,
+      playlistTitle: r.playlist_title,
+      title: r.title,
+      songType,
+      animeTitle: r.anime_title,
+      durationIso: r.duration_iso,
+      thumbnailUrl: r.thumbnail_url,
+      publishedAt: r.published_at,
+      viewCount: r.view_count || 0,
+      likeCount: r.like_count || 0,
+      regionAllowed: parseJsonArray(r.region_allowed),
+      regionBlocked: parseJsonArray(r.region_blocked),
+    };
+
+    const rawGroupTitle = (r.series_title || r.anime_title || r.playlist_title || r.title).trim();
+    const normTitleKey = rawGroupTitle.toLowerCase().replace(/\s+/g, ' ');
+    const groupKey = r.series_id
+      ? `series:${r.series_id}`
+      : r.playlist_id
+        ? `playlist:${r.channel_id}:${r.playlist_id}`
+        : `anime:${normTitleKey}`;
+
+    let grp = groupMap.get(groupKey);
+    if (!grp) {
+      grp = {
+        groupKey,
+        title: rawGroupTitle,
+        seriesSlug: r.series_slug,
+        thumbnailUrl: r.thumbnail_url || r.series_poster || null,
+        channelName: r.channel_name,
+        channelAvatar: r.channel_avatar,
+        trackCount: 0,
+        opCount: 0,
+        edCount: 0,
+        ostCount: 0,
+        totalViews: 0,
+        latestPublishedAt: null,
+        tracks: [],
+      };
+      groupMap.set(groupKey, grp);
+    }
+
+    grp.tracks.push(item);
+    grp.trackCount++;
+    if (songType === 'op') grp.opCount++;
+    else if (songType === 'ed') grp.edCount++;
+    else grp.ostCount++;
+    grp.totalViews += item.viewCount;
+    if (item.publishedAt && (!grp.latestPublishedAt || item.publishedAt > grp.latestPublishedAt)) {
+      grp.latestPublishedAt = item.publishedAt;
+    }
+    if (!grp.thumbnailUrl && item.thumbnailUrl) {
+      grp.thumbnailUrl = item.thumbnailUrl;
+    }
+  }
+
+  const typeOrder = { op: 0, ed: 1, ost: 2 };
+  const allGroups = [...groupMap.values()];
+  for (const grp of allGroups) {
+    grp.tracks.sort((a, b) => typeOrder[a.songType] - typeOrder[b.songType] || b.viewCount - a.viewCount);
+  }
+
+  if (opts.sort === 'recent') {
+    allGroups.sort((a, b) => (b.latestPublishedAt || 0) - (a.latestPublishedAt || 0) || b.totalViews - a.totalViews);
+  } else if (opts.sort === 'az') {
+    allGroups.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+  } else {
+    allGroups.sort((a, b) => b.totalViews - a.totalViews || b.trackCount - a.trackCount);
+  }
+
+  const total = allGroups.length;
+  const offset = (page - 1) * limit;
+  const groups = allGroups.slice(offset, offset + limit);
+
+  return { groups, total, page, limit, counts };
 }

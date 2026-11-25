@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { closeDatabase, openDatabase, refreshSeriesStats } from './db/index.ts';
+import { closeDatabase, openDatabase, recordYouTubeQuotaUnits, refreshSeriesStats } from './db/index.ts';
 import { createApp } from './server.ts';
 
 test('Hono API serves channels, grouped series, FTS search, and series detail', async () => {
@@ -92,6 +92,13 @@ test('Hono API serves channels, grouped series, FTS search, and series detail', 
      VALUES (?, 'live_vid_1', 'Frieren 24/7 Marathon Live', 'live', 1500, 1702000500)`
   ).run(ch1.id);
 
+  db.prepare(
+    `INSERT INTO songs (channel_id, series_id, youtube_video_id, playlist_id, playlist_title, title, song_type, anime_title, duration_iso, view_count, like_count, published_at, region_allowed)
+     VALUES (?, ?, 'song_op_1', 'PL_OPED', 'Anime OP & ED', 'Frieren Creditless Opening OP1 - Yuusha', 'op', 'Frieren', 'PT1M30S', 500000, 25000, 1700500000, '["MY","SG"]'),
+            (?, ?, 'song_ed_1', 'PL_OPED', 'Anime OP & ED', 'Frieren Creditless Ending ED1 - Anytime Anywhere', 'ed', 'Frieren', 'PT1M30S', 300000, 18000, 1700400000, '["MY","SG"]'),
+            (?, ?, 'song_ost_1', 'PL_OST', 'Frieren OST', 'Frieren Original Soundtrack OST - Zoltraak', 'ost', 'Frieren', 'PT3M10S', 200000, 12000, 1700300000, '["TW","HK"]')`
+  ).run(ch1.id, seriesId, ch1.id, seriesId, ch2.id, seriesId);
+
   const app = createApp(':memory:');
 
   const healthRes = await app.request('/api/health');
@@ -126,6 +133,38 @@ test('Hono API serves channels, grouped series, FTS search, and series detail', 
   const liveJson = (await liveRes.json()) as any;
   assert.equal(liveJson.streams.length, 1);
   assert.equal(liveJson.streams[0].youtube_video_id, 'live_vid_1');
+
+  // Songs (OP, ED, OST) API: counts, type filtering, search, and geo filtering
+  const songsAllRes = await app.request('/api/songs');
+  assert.equal(songsAllRes.status, 200);
+  const songsAllJson = (await songsAllRes.json()) as any;
+  assert.equal(songsAllJson.total, 3);
+  assert.deepEqual(songsAllJson.counts, { all: 3, op: 1, ed: 1, ost: 1 });
+  assert.equal(songsAllJson.items[0].youtubeVideoId, 'song_op_1');
+
+  const songsOpRes = await app.request('/api/songs?type=op');
+  const songsOpJson = (await songsOpRes.json()) as any;
+  assert.equal(songsOpJson.total, 1);
+  assert.equal(songsOpJson.items[0].songType, 'op');
+
+  const songsGeoRes = await app.request('/api/songs?region=MY');
+  const songsGeoJson = (await songsGeoRes.json()) as any;
+  assert.equal(songsGeoJson.total, 2);
+  assert.deepEqual(songsGeoJson.counts, { all: 2, op: 1, ed: 1, ost: 0 });
+
+  const songsGroupedRes = await app.request('/api/songs?group=anime');
+  assert.equal(songsGroupedRes.status, 200);
+  const songsGroupedJson = (await songsGroupedRes.json()) as any;
+  assert.equal(songsGroupedJson.total, 1);
+  assert.equal(songsGroupedJson.groups[0].trackCount, 3);
+  assert.equal(songsGroupedJson.groups[0].opCount, 1);
+  assert.equal(songsGroupedJson.groups[0].edCount, 1);
+  assert.equal(songsGroupedJson.groups[0].ostCount, 1);
+  assert.equal(songsGroupedJson.groups[0].tracks[0].songType, 'op');
+
+  const songsPageRes = await app.request('/songs');
+  assert.equal(songsPageRes.status, 200);
+  assert.match(await songsPageRes.text(), /Anime Songs — Official OP, ED &amp; OST/);
 
   // Shelves require at least 3 free episodes; the fixture only has 2.
   const shortUnlockedJson = (await (await app.request('/api/unlocked')).json()) as any;
@@ -220,7 +259,9 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
   closeDatabase();
   const db = openDatabase(':memory:');
   const prevToken = process.env.ADMIN_TOKEN;
-  const triggeredSyncs: string[] = [];
+  const triggeredSyncs: Array<{ id: string; scope?: string }> = [];
+  const triggeredGlobalSyncs: Array<{ kind: string; scope?: string }> = [];
+  const runNowCalls: Array<string | undefined> = [];
 
   try {
     delete process.env.ADMIN_TOKEN;
@@ -239,13 +280,38 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
       admin: {
         jobs: {
           triggerLiveCheck: () => true,
-          triggerChannelSync: (id?: string) => {
-            if (id) triggeredSyncs.push(id);
+          triggerChannelSync: (id?: string, scope?: string) => {
+            if (id) triggeredSyncs.push({ id, scope });
             return true;
           },
-          triggerIncrementalSync: () => true,
-          triggerFullSync: () => true,
+          triggerIncrementalSync: (scope?: string) => {
+            triggeredGlobalSyncs.push({ kind: 'incremental', scope });
+            return true;
+          },
+          triggerFullSync: (scope?: string) => {
+            triggeredGlobalSyncs.push({ kind: 'full', scope });
+            return true;
+          },
+          triggerSongSync: () => {
+            triggeredGlobalSyncs.push({ kind: 'songs' });
+            return true;
+          },
           triggerDiscovery: () => true,
+          runQueuedNow: (jobId?: string) => {
+            runNowCalls.push(jobId);
+            if (jobId === 'missing') {
+              return { ok: false, startedOrPromoted: null, preemptedRunningJob: null };
+            }
+            return {
+              ok: true,
+              startedOrPromoted: jobId || 'channel sync (UC_PENDING_1)',
+              preemptedRunningJob: 'daily full channel & episode sync',
+            };
+          },
+          removeQueuedJob: (jobId: string) => {
+            if (jobId === 'missing') return { ok: false, removedLabel: null };
+            return { ok: true, removedLabel: `queued:${jobId}` };
+          },
           getStatus: () => ({
             runningJob: null,
             startedAt: null,
@@ -253,6 +319,7 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
             lastFinishedAt: null,
             lastExitCode: null,
             queuedCount: 0,
+            queuedJobs: [],
             autoSyncEnabled: true,
             hasYouTubeApiKey: true,
             intervals: {
@@ -270,13 +337,13 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
           }),
           stop: () => {},
         },
-        addChannel: async (targetDb, rawInput) => {
+        addChannel: async (targetDb, rawInput, addOpts) => {
           const res = targetDb
             .prepare(
-              `INSERT INTO channels (youtube_channel_id, handle, name, url, sub_languages, category, region_focus, discovery_source, is_verified, playlist_count)
-               VALUES ('UC_ADDED_BY_ADMIN', '@NewSubAnime', 'New Sub Anime', 'https://www.youtube.com/@NewSubAnime', '["en"]', 'anime', 'Global', 'manual', 1, 9)`
+              `INSERT INTO channels (youtube_channel_id, handle, name, url, sub_languages, category, region_focus, discovery_source, is_verified, playlist_count, sync_playlists, sync_videos)
+               VALUES ('UC_ADDED_BY_ADMIN', '@NewSubAnime', 'New Sub Anime', 'https://www.youtube.com/@NewSubAnime', '["en"]', 'anime', 'Global', 'manual', 1, 9, ?, ?)`
             )
-            .run();
+            .run(addOpts.syncPlaylists === false ? 0 : 1, addOpts.syncVideos === false ? 0 : 1);
           return {
             ok: true,
             channelId: Number(res.lastInsertRowid),
@@ -289,6 +356,67 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
             subLanguages: ['en'],
           };
         },
+        youtubeSearch: async (query, type) => [
+          {
+            kind: type,
+            id: type === 'video' ? 'yt_song_99' : 'PL_YT_99',
+            title: type === 'video' ? `${query} Creditless Opening OP1` : `${query} [Eng Sub]`,
+            description: 'Official upload',
+            channelId: 'UC_YT_SEARCH_1',
+            channelTitle: 'Official Studio YT',
+            thumbnailUrl: 'https://i.ytimg.com/vi/yt_song_99/hqdefault.jpg',
+            publishedAt: '2025-01-10T00:00:00Z',
+          },
+        ],
+        fetchChannels: async (ids) =>
+          ids.map((id) => ({
+            id,
+            title: 'Official Studio YT',
+            description: 'Official anime studio',
+            customUrl: '@OfficialStudioYT',
+            avatarUrl: null,
+            uploadsPlaylistId: `UU${id.slice(2)}`,
+            videoCount: 20,
+          })),
+        fetchPlaylistItems: async () => [
+          {
+            videoId: 'yt_ep_99_1',
+            title: 'Dandadan Episode 01 [Eng Sub]',
+            description: 'Official Episode 1',
+            position: 0,
+            thumbnailUrl: 'https://i.ytimg.com/vi/yt_ep_99_1/hqdefault.jpg',
+            publishedAt: '2025-01-10T00:00:00Z',
+          },
+        ],
+        fetchVideoDetails: async (ids) =>
+          new Map(
+            ids.map((id) => [
+              id,
+              {
+                id,
+                title: id === 'yt_song_99' ? 'Dandadan Creditless Opening OP1' : 'Dandadan Episode 01 [Eng Sub]',
+                description: 'Official',
+                publishedAt: '2025-01-10T00:00:00Z',
+                durationIso: id === 'yt_song_99' ? 'PT1M30S' : 'PT24M',
+                tags: ['anime'],
+                defaultLanguage: 'en',
+                defaultAudioLanguage: 'ja',
+                viewCount: 150000,
+                likeCount: 9000,
+                commentCount: 300,
+                privacyStatus: 'public',
+                liveBroadcastContent: 'none',
+                concurrentViewers: 0,
+                actualStartTime: null,
+                scheduledStartTime: null,
+                thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+                isMembersOnly: false,
+                embeddable: true,
+                regionAllowed: [],
+                regionBlocked: [],
+              },
+            ])
+          ),
       },
     });
 
@@ -342,20 +470,20 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
     });
     assert.equal(csrfBlocked.status, 403);
 
-    // Authenticated POST /api/admin/channels adds & queues sync
+    // Authenticated POST /api/admin/channels adds & queues sync with syncPlaylists + syncVideos
     const addRes = await app.request('/api/admin/channels', {
       method: 'POST',
       headers: {
         authorization: 'Bearer super-secret-admin-token-1234',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ channel: '@NewSubAnime' }),
+      body: JSON.stringify({ channel: '@NewSubAnime', syncPlaylists: true, syncVideos: true }),
     });
     assert.equal(addRes.status, 200);
     const addJson = (await addRes.json()) as any;
     assert.equal(addJson.ok, true);
     assert.equal(addJson.syncQueued, true);
-    assert.deepEqual(triggeredSyncs, ['UC_ADDED_BY_ADMIN']);
+    assert.deepEqual(triggeredSyncs, [{ id: 'UC_ADDED_BY_ADMIN', scope: 'both' }]);
 
     // Approve pending candidate #1
     const approveRes = await app.request('/api/admin/channels/1/approve', {
@@ -367,10 +495,338 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
       body: '{}',
     });
     assert.equal(approveRes.status, 200);
-    assert.deepEqual(triggeredSyncs, ['UC_ADDED_BY_ADMIN', 'UC_PENDING_1']);
+    assert.deepEqual(triggeredSyncs, [
+      { id: 'UC_ADDED_BY_ADMIN', scope: 'both' },
+      { id: 'UC_PENDING_1', scope: undefined },
+    ]);
 
     const pubAfter = (await (await app.request('/api/channels')).json()) as any;
     assert.equal(pubAfter.channels.length, 2);
+
+    // Update per-channel sync options (videos only) and trigger sync
+    const patchOptsRes = await app.request('/api/admin/channels/2/sync-options', {
+      method: 'PATCH',
+      headers: {
+        cookie: cookieHeader,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ syncPlaylists: false, syncVideos: true }),
+    });
+    assert.equal(patchOptsRes.status, 200);
+    const patchOptsJson = (await patchOptsRes.json()) as any;
+    assert.equal(patchOptsJson.syncPlaylists, false);
+    assert.equal(patchOptsJson.syncVideos, true);
+
+    const syncChRes = await app.request('/api/admin/channels/2/sync', {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    assert.equal(syncChRes.status, 200);
+    const syncChJson = (await syncChRes.json()) as any;
+    assert.equal(syncChJson.scope, 'videos');
+    assert.deepEqual(triggeredSyncs[2], { id: 'UC_ADDED_BY_ADMIN', scope: 'videos' });
+
+    // Disable both sync options -> sync without explicit scope returns 400
+    await app.request('/api/admin/channels/2/sync-options', {
+      method: 'PATCH',
+      headers: {
+        cookie: cookieHeader,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ syncPlaylists: false, syncVideos: false }),
+    });
+    const disabledSyncRes = await app.request('/api/admin/channels/2/sync', {
+      method: 'POST',
+      headers: {
+        cookie: cookieHeader,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    assert.equal(disabledSyncRes.status, 400);
+
+    // Global sync endpoints forward scope
+    const incRes = await app.request('/api/admin/sync/incremental', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'videos' }),
+    });
+    assert.equal(incRes.status, 200);
+    const fullRes = await app.request('/api/admin/sync/full', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'playlists' }),
+    });
+    assert.equal(fullRes.status, 200);
+    const songsSyncRes = await app.request('/api/admin/sync/songs', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(songsSyncRes.status, 200);
+    assert.deepEqual(triggeredGlobalSyncs, [
+      { kind: 'incremental', scope: 'videos' },
+      { kind: 'full', scope: 'playlists' },
+      { kind: 'songs' },
+    ]);
+
+    // Seed an exclusive series on channel #2 and a shared series across channels #1 & #2, then delete channel #2
+    const exclusiveSeriesId = Number(
+      db
+        .prepare("INSERT INTO series (slug, canonical_title, normalized_key) VALUES ('solo-show', 'Solo Show', 'solo show')")
+        .run().lastInsertRowid
+    );
+    const sharedSeriesId = Number(
+      db
+        .prepare("INSERT INTO series (slug, canonical_title, normalized_key) VALUES ('shared-show', 'Shared Show', 'shared show')")
+        .run().lastInsertRowid
+    );
+    const csSolo = Number(
+      db
+        .prepare(
+          "INSERT INTO channel_series (channel_id, series_id, playlist_id, playlist_title, playlist_url, sub_language, episode_count) VALUES (2, ?, 'PL_SOLO', 'Solo Show', 'https://youtube.com/playlist?list=PL_SOLO', 'en', 1)"
+        )
+        .run(exclusiveSeriesId).lastInsertRowid
+    );
+    const csSharedCh1 = Number(
+      db
+        .prepare(
+          "INSERT INTO channel_series (channel_id, series_id, playlist_id, playlist_title, playlist_url, sub_language, episode_count) VALUES (1, ?, 'PL_SH1', 'Shared Show', 'https://youtube.com/playlist?list=PL_SH1', 'en', 1)"
+        )
+        .run(sharedSeriesId).lastInsertRowid
+    );
+    const csSharedCh2 = Number(
+      db
+        .prepare(
+          "INSERT INTO channel_series (channel_id, series_id, playlist_id, playlist_title, playlist_url, sub_language, episode_count) VALUES (2, ?, 'PL_SH2', 'Shared Show ZH', 'https://youtube.com/playlist?list=PL_SH2', 'zh-Hant', 1)"
+        )
+        .run(sharedSeriesId).lastInsertRowid
+    );
+    db.prepare(
+      `INSERT INTO episodes (channel_series_id, series_id, channel_id, youtube_video_id, title, episode_number, playlist_position, sub_language, view_count)
+       VALUES (?, ?, 2, 'vid_solo_1', 'Solo EP01', 1, 0, 'en', 1000),
+              (?, ?, 1, 'vid_sh_1', 'Shared EP01', 1, 0, 'en', 2000),
+              (?, ?, 2, 'vid_sh_2', 'Shared EP01 ZH', 1, 0, 'zh-Hant', 3000)`
+    ).run(csSolo, exclusiveSeriesId, csSharedCh1, sharedSeriesId, csSharedCh2, sharedSeriesId);
+    refreshSeriesStats(db, exclusiveSeriesId);
+    refreshSeriesStats(db, sharedSeriesId);
+
+    const delRes = await app.request('/api/admin/channels/2', {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delRes.status, 200);
+    const delJson = (await delRes.json()) as any;
+    assert.equal(delJson.ok, true);
+    assert.equal(delJson.deleted.deletedEpisodes, 2);
+    assert.equal(delJson.deleted.removedSeriesCount, 1);
+    assert.equal(delJson.deleted.updatedSeriesCount, 1);
+
+    // Channel #2 and its videos are gone; orphaned solo series is removed; shared series is refreshed
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM channels WHERE id = 2').get() as { c: number }).c, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM episodes WHERE channel_id = 2').get() as { c: number }).c, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM series WHERE id = ?').get(exclusiveSeriesId) as { c: number }).c, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM series_fts WHERE series_id = ?').get(exclusiveSeriesId) as { c: number }).c, 0);
+    const sharedAfter = db
+      .prepare('SELECT episode_count, total_views, sub_languages FROM series WHERE id = ?')
+      .get(sharedSeriesId) as { episode_count: number; total_views: number; sub_languages: string };
+    assert.equal(sharedAfter.episode_count, 1);
+    assert.equal(sharedAfter.total_views, 2000);
+    assert.equal(sharedAfter.sub_languages, '["en"]');
+
+    // Deleting non-existent channel returns 404
+    const delMissing = await app.request('/api/admin/channels/999', {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delMissing.status, 404);
+
+    // Run a queued job immediately via /api/admin/jobs/run-now
+    const runNowRes = await app.request('/api/admin/jobs/run-now', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: 'channel:UC_PENDING_1:default' }),
+    });
+    assert.equal(runNowRes.status, 200);
+    const runNowJson = (await runNowRes.json()) as any;
+    assert.equal(runNowJson.ok, true);
+    assert.equal(runNowJson.startedOrPromoted, 'channel:UC_PENDING_1:default');
+    assert.equal(runNowJson.preemptedRunningJob, 'daily full channel & episode sync');
+
+    const runNowMissing = await app.request('/api/admin/jobs/run-now', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: 'missing' }),
+    });
+    assert.equal(runNowMissing.status, 400);
+    assert.deepEqual(runNowCalls, ['channel:UC_PENDING_1:default', 'missing']);
+
+    // List & remove specific video and specific playlist from channel #1
+    const extraSeriesId = Number(
+      db
+        .prepare("INSERT INTO series (slug, canonical_title, normalized_key) VALUES ('extra-show', 'Extra Show', 'extra show')")
+        .run().lastInsertRowid
+    );
+    const csExtra = Number(
+      db
+        .prepare(
+          "INSERT INTO channel_series (channel_id, series_id, playlist_id, playlist_title, playlist_url, sub_language, episode_count) VALUES (1, ?, 'PL_EXTRA', 'Extra Show Playlist', 'https://youtube.com/playlist?list=PL_EXTRA', 'en', 2)"
+        )
+        .run(extraSeriesId).lastInsertRowid
+    );
+    const ep1Id = Number(
+      db
+        .prepare(
+          "INSERT INTO episodes (channel_series_id, series_id, channel_id, youtube_video_id, title, episode_number, playlist_position, sub_language, view_count) VALUES (?, ?, 1, 'vid_extra_1', 'Extra EP01', 1, 0, 'en', 500)"
+        )
+        .run(csExtra, extraSeriesId).lastInsertRowid
+    );
+    db.prepare(
+      "INSERT INTO episodes (channel_series_id, series_id, channel_id, youtube_video_id, title, episode_number, playlist_position, sub_language, view_count) VALUES (?, ?, 1, 'vid_extra_2', 'Extra EP02', 2, 1, 'en', 700)"
+    ).run(csExtra, extraSeriesId);
+    refreshSeriesStats(db, extraSeriesId);
+
+    const plListRes = await app.request('/api/admin/channels/1/playlists', {
+      headers: { cookie: cookieHeader },
+    });
+    assert.equal(plListRes.status, 200);
+    const plListJson = (await plListRes.json()) as any;
+    assert.ok(plListJson.playlists.some((p: any) => p.id === csExtra && p.episodeCount === 2));
+
+    const vidListRes = await app.request(`/api/admin/channels/1/videos?channelSeriesId=${csExtra}`, {
+      headers: { cookie: cookieHeader },
+    });
+    assert.equal(vidListRes.status, 200);
+    const vidListJson = (await vidListRes.json()) as any;
+    assert.equal(vidListJson.total, 2);
+    assert.equal(vidListJson.videos.length, 2);
+
+    // Delete a single video from channel #1 -> playlist & series remain with 1 episode
+    const delVidRes = await app.request(`/api/admin/channels/1/videos/${ep1Id}`, {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delVidRes.status, 200);
+    const delVidJson = (await delVidRes.json()) as any;
+    assert.equal(delVidJson.deleted.removedPlaylist, false);
+    assert.equal(delVidJson.deleted.removedSeries, false);
+    const extraSeriesMid = db
+      .prepare('SELECT episode_count, total_views FROM series WHERE id = ?')
+      .get(extraSeriesId) as { episode_count: number; total_views: number };
+    assert.equal(extraSeriesMid.episode_count, 1);
+    assert.equal(extraSeriesMid.total_views, 700);
+
+    // Delete the playlist from channel #1 -> remaining video and orphaned series are removed
+    const delPlRes = await app.request(`/api/admin/channels/1/playlists/${csExtra}`, {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delPlRes.status, 200);
+    const delPlJson = (await delPlRes.json()) as any;
+    assert.equal(delPlJson.deleted.deletedEpisodes, 1);
+    assert.equal(delPlJson.deleted.removedSeries, true);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM channel_series WHERE id = ?').get(csExtra) as { c: number }).c, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM series WHERE id = ?').get(extraSeriesId) as { c: number }).c, 0);
+
+    // Deleting a playlist/video that does not belong to channel #1 returns 404
+    const delPlMissing = await app.request(`/api/admin/channels/1/playlists/${csExtra}`, {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delPlMissing.status, 404);
+    const delVidMissing = await app.request(`/api/admin/channels/1/videos/${ep1Id}`, {
+      method: 'DELETE',
+      headers: { cookie: cookieHeader, 'x-admin-action': '1' },
+    });
+    assert.equal(delVidMissing.status, 404);
+
+    // Admin session check & YouTube search + inline import (anime playlist & song)
+    assert.equal((await app.request('/api/admin/session')).status, 404);
+    const sessionRes = await app.request('/api/admin/session', { headers: { cookie: cookieHeader } });
+    assert.equal(sessionRes.status, 200);
+    assert.equal(((await sessionRes.json()) as any).isAdmin, true);
+
+    const ytAnimeRes = await app.request('/api/admin/youtube/search?mode=anime&q=Dandadan', {
+      headers: { cookie: cookieHeader },
+    });
+    assert.equal(ytAnimeRes.status, 200);
+    const ytAnimeJson = (await ytAnimeRes.json()) as any;
+    assert.equal(ytAnimeJson.results[0].id, 'PL_YT_99');
+
+    const importPlRes = await app.request('/api/admin/youtube/import-playlist', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        playlistId: 'PL_YT_99',
+        playlistTitle: 'Dandadan [Eng Sub]',
+        channelId: 'UC_YT_SEARCH_1',
+        channelTitle: 'Official Studio YT',
+      }),
+    });
+    assert.equal(importPlRes.status, 200);
+    const importPlJson = (await importPlRes.json()) as any;
+    assert.equal(importPlJson.importedEpisodes, 1);
+
+    const ytSongsRes = await app.request('/api/admin/youtube/search?mode=songs&q=Dandadan', {
+      headers: { cookie: cookieHeader },
+    });
+    assert.equal(ytSongsRes.status, 200);
+    const ytSongsJson = (await ytSongsRes.json()) as any;
+    assert.equal(ytSongsJson.results[0].suggestedSongType, 'op');
+
+    const importSongRes = await app.request('/api/admin/youtube/import-song', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        videoId: 'yt_song_99',
+        title: 'Dandadan Creditless Opening OP1',
+        channelId: 'UC_YT_SEARCH_1',
+        channelTitle: 'Official Studio YT',
+        songType: 'op',
+      }),
+    });
+    assert.equal(importSongRes.status, 200);
+    const importSongJson = (await importSongRes.json()) as any;
+    assert.equal(importSongJson.song.songType, 'op');
+
+    const songsCheck = (await (await app.request('/api/songs?q=Dandadan')).json()) as any;
+    assert.equal(songsCheck.total, 1);
+    assert.equal(songsCheck.items[0].youtubeVideoId, 'yt_song_99');
+
+    // Queued job removal + YouTube daily quota tracking
+    const removeQRes = await app.request('/api/admin/jobs/remove', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: 'songs' }),
+    });
+    assert.equal(removeQRes.status, 200);
+    assert.equal(((await removeQRes.json()) as any).removedLabel, 'queued:songs');
+
+    const removeQMissing = await app.request('/api/admin/jobs/remove', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({ jobId: 'missing' }),
+    });
+    assert.equal(removeQMissing.status, 404);
+
+    const prevYtKey = process.env.YOUTUBE_API_KEY;
+    try {
+      process.env.YOUTUBE_API_KEY = 'fake-test-youtube-key';
+      recordYouTubeQuotaUnits(db, 350);
+      const quotaRes = await app.request('/api/admin/jobs', { headers: { cookie: cookieHeader } });
+      assert.equal(quotaRes.status, 200);
+      const quotaJson = (await quotaRes.json()) as any;
+      assert.equal(quotaJson.quota.usedToday, 350);
+      assert.equal(quotaJson.quota.remaining, quotaJson.quota.dailyLimit - 350);
+      assert.ok(quotaJson.quota.dailyLimit >= 10000);
+    } finally {
+      if (prevYtKey === undefined) delete process.env.YOUTUBE_API_KEY;
+      else process.env.YOUTUBE_API_KEY = prevYtKey;
+    }
   } finally {
     if (prevToken === undefined) delete process.env.ADMIN_TOKEN;
     else process.env.ADMIN_TOKEN = prevToken;

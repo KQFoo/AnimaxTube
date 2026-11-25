@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  classifyAnimeSong,
   cleanSeriesTitle,
   detectChineseScript,
   detectSubLanguage,
@@ -8,6 +9,7 @@ import {
   extractExpiryDate,
   isMembersOnlyPlaylist,
   isMembersOnlyText,
+  isMusicPlaylist,
   isNonSeriesPlaylist,
   isPromoVideo,
   normalizeSeriesKey,
@@ -146,4 +148,20 @@ test('buzz score stays within 0..100 for extreme inputs', () => {
   assert.ok(max.buzzScore <= 100 && max.buzzScore > 50);
   const min = scoreCommentsForRecommendation([], { viewCount: 0, likeCount: 0, commentCount: 0 });
   assert.ok(min.buzzScore >= 0);
+});
+
+test('isMusicPlaylist and classifyAnimeSong identify OP, ED, and OST anime songs', () => {
+  assert.equal(isMusicPlaylist('Anime OP & ED Creditless'), true);
+  assert.equal(isMusicPlaylist('Original Soundtrack / OST'), true);
+  assert.equal(isMusicPlaylist('Frieren [Eng Sub]'), false);
+  assert.equal(isMusicPlaylist('Members Only OP & ED'), false);
+
+  assert.equal(classifyAnimeSong('Frieren Creditless Opening "Yuusha" | OP1'), 'op');
+  assert.equal(classifyAnimeSong('《葬送的芙莉蓮》片頭曲 無字幕OP'), 'op');
+  assert.equal(classifyAnimeSong('Jujutsu Kaisen Ending Theme ED2'), 'ed');
+  assert.equal(classifyAnimeSong('《進擊的巨人》片尾曲'), 'ed');
+  assert.equal(classifyAnimeSong('Solo Leveling Original Soundtrack OST - DARK ARIA'), 'ost');
+  assert.equal(classifyAnimeSong('YOASOBI - Idol (Official Music Video)'), 'ost');
+  assert.equal(classifyAnimeSong('Episode 01 Full Anime [Eng Sub]'), null);
+  assert.equal(classifyAnimeSong('Track 01 - Main Theme', 'Anime Original Soundtrack'), 'ost');
 });

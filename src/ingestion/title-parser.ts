@@ -95,6 +95,45 @@ export function isNonSeriesPlaylist(playlistTitle: string): boolean {
   return NON_SERIES_PLAYLIST_PATTERNS.some((re) => re.test(t));
 }
 
+export type SongType = 'op' | 'ed' | 'ost';
+
+const MUSIC_PLAYLIST_RE =
+  /\bmusic\s*videos?\b|\bmv\b|\bost\b|\bsoundtrack\b|\bopening\b|\bending\b|\bop\s*[&/]\s*ed\b|\boped\b|\btheme\s*songs?\b|\binsert\s*songs?\b|\bcharacter\s*songs?\b|\bncop\b|\bnced\b|主題曲|主题曲|片頭曲|片头曲|片尾曲|插曲|原聲帶|原声带|角色歌/i;
+
+const SONG_OP_RE =
+  /\b(?:creditless\s+)?openings?\b|\bop\s*(?:\d+|ver\.?|version|theme|movie)?\b|\bncop\d*\b|片頭曲|片头曲|無字幕\s*op|无字幕\s*op|オープニング/i;
+
+const SONG_ED_RE =
+  /\b(?:creditless\s+)?endings?\b|\bed\s*(?:\d+|ver\.?|version|theme|movie)?\b|\bnced\d*\b|片尾曲|無字幕\s*ed|无字幕\s*ed|エンディング/i;
+
+const SONG_OST_RE =
+  /\bost\b|\boriginal\s*soundtrack\b|\bsoundtrack\b|\bbgm\b|\binsert\s*song\b|\btheme\s*song\b|\bmusic\s*video\b|\bcharacter\s*song\b|\bimage\s*song\b|\bmv\b|主題曲|主题曲|插曲|原聲帶|原声带|角色歌|劇中歌|剧中歌/i;
+
+const NON_SONG_NOISE_RE =
+  /#shorts\b|\bgameplay\b|\bgaming\b|\bpodcast\b|\bunboxing\b|\bmerch\b|\bgunpla\b|\binterview\b|\breaction\b|\bmarathon\b|馬拉松/i;
+
+export function isMusicPlaylist(playlistTitle: string): boolean {
+  const t = playlistTitle.trim();
+  if (!t || isMembersOnlyPlaylist(t)) return false;
+  return MUSIC_PLAYLIST_RE.test(t);
+}
+
+export function classifyAnimeSong(videoTitle: string, playlistTitle = ''): SongType | null {
+  const title = videoTitle.trim();
+  if (!title || NON_SONG_NOISE_RE.test(title)) return null;
+  if (SONG_OP_RE.test(title)) return 'op';
+  if (SONG_ED_RE.test(title)) return 'ed';
+  if (SONG_OST_RE.test(title)) return 'ost';
+
+  if (playlistTitle && isMusicPlaylist(playlistTitle)) {
+    if (/\bpreview\b|\btrailer\b|\bteaser\b|預告/i.test(title)) return null;
+    if (SONG_OP_RE.test(playlistTitle) && !SONG_ED_RE.test(playlistTitle)) return 'op';
+    if (SONG_ED_RE.test(playlistTitle) && !SONG_OP_RE.test(playlistTitle)) return 'ed';
+    return 'ost';
+  }
+  return null;
+}
+
 export function isMembersOnlyPlaylist(playlistTitle: string): boolean {
   return /\bmembers?\s*only\b|\bmembership\b|\bani-one\s+ultra\b|\bultra\b.*(?:ani-one|會員)|會員限定|會員專屬|會員搶先|僅限會員/i.test(
     playlistTitle

@@ -17,6 +17,7 @@
     "sync": "tsx src/ingestion/sync-channels.ts",
     "sync:incremental": "node src/ingestion/sync-channels.ts --incremental",
     "sync:new": "node src/ingestion/sync-channels.ts --only-unsynced",
+    "sync:songs": "tsx src/ingestion/sync-songs.ts",
     "enrich": "tsx src/ingestion/anilist-enrich.ts",
     "enrich:videos": "tsx src/ingestion/enrich-videos.ts",
     "enrich:comments": "tsx src/ingestion/enrich-comments.ts",
