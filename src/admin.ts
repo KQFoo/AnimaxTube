@@ -1426,7 +1426,8 @@ export function registerAdminRoutes(app: Hono, db: DatabaseSync, opts: AdminRout
   app.get('/api/admin/youtube/search', async (c) => {
     const q = (c.req.query('q') || '').trim().slice(0, 120);
     if (!q) return c.json({ error: 'q is required' }, 400);
-    const mode = c.req.query('mode') === 'songs' ? 'songs' : 'anime';
+    const rawMode = c.req.query('mode');
+    const mode = rawMode === 'songs' ? 'songs' : rawMode === 'videos' ? 'videos' : 'anime';
 
     try {
       if (mode === 'songs') {
@@ -1449,6 +1450,41 @@ export function registerAdminRoutes(app: Hono, db: DatabaseSync, opts: AdminRout
             ...r,
             suggestedSongType: classifyAnimeSong(r.title) || 'ost',
             alreadyInDb: existingSet.has(r.id),
+          })),
+        });
+      }
+
+      if (mode === 'videos') {
+        const results = await ytSearchFn(q, 'video', 8);
+        const chIds = [...new Set(results.map((r) => r.channelId).filter(Boolean))];
+        const vidIds = [...new Set(results.map((r) => r.id).filter(Boolean))];
+        const chSet = new Set(
+          chIds.length > 0
+            ? (
+                db
+                  .prepare(`SELECT youtube_channel_id FROM channels WHERE youtube_channel_id IN (${chIds.map(() => '?').join(',')})`)
+                  .all(...chIds) as unknown as Array<{ youtube_channel_id: string }>
+              ).map((r) => r.youtube_channel_id)
+            : []
+        );
+        const vidSet = new Set(
+          vidIds.length > 0
+            ? (
+                db
+                  .prepare(`SELECT youtube_video_id FROM episodes WHERE youtube_video_id IN (${vidIds.map(() => '?').join(',')})`)
+                  .all(...vidIds) as unknown as Array<{ youtube_video_id: string }>
+              ).map((r) => r.youtube_video_id)
+            : []
+        );
+
+        return c.json({
+          ok: true,
+          mode,
+          query: q,
+          results: results.map((r) => ({
+            ...r,
+            channelInDb: chSet.has(r.channelId),
+            videoInDb: vidSet.has(r.id),
           })),
         });
       }
@@ -1642,6 +1678,141 @@ export function registerAdminRoutes(app: Hono, db: DatabaseSync, opts: AdminRout
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : 'Failed importing playlist' }, 502);
+    }
+  });
+
+  app.post('/api/admin/youtube/import-video', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      videoId?: unknown;
+      title?: unknown;
+      channelId?: unknown;
+      channelTitle?: unknown;
+      thumbnailUrl?: unknown;
+      publishedAt?: unknown;
+    };
+    const videoId = typeof body.videoId === 'string' ? body.videoId.trim() : '';
+    const rawTitle = typeof body.title === 'string' ? body.title.trim() : '';
+    const youtubeChannelId = typeof body.channelId === 'string' ? body.channelId.trim() : '';
+    const channelTitle = typeof body.channelTitle === 'string' ? body.channelTitle.trim() : '';
+    const thumbnailUrl = typeof body.thumbnailUrl === 'string' ? body.thumbnailUrl.trim() : null;
+    const publishedAtStr = typeof body.publishedAt === 'string' ? body.publishedAt.trim() : null;
+
+    if (!videoId || !youtubeChannelId) {
+      return c.json({ error: 'videoId and channelId are required' }, 400);
+    }
+
+    try {
+      const ch = await ensureChannelInDb(youtubeChannelId, channelTitle || youtubeChannelId, {
+        syncPlaylists: true,
+        syncVideos: true,
+      });
+
+      const detailsMap = await ytFetchVideoDetailsFn([videoId]).catch(() => new Map<string, YtVideoDetail>());
+      const d = detailsMap.get(videoId);
+      if (d && (!d.embeddable || d.isMembersOnly || isMembersOnlyText(`${d.title} ${d.description}`))) {
+        return c.json({ error: 'This YouTube video is not publicly embeddable' }, 422);
+      }
+
+      const finalTitle = d?.title || rawTitle || videoId;
+      const detectedLang = detectSubLanguage(finalTitle, 'en');
+      const subLang = detectedLang === 'other' ? 'en' : detectedLang;
+      const cleaned = cleanSeriesTitle(finalTitle);
+      const key = normalizeSeriesKey(cleaned);
+
+      let seriesRow = db
+        .prepare('SELECT id, slug FROM series WHERE normalized_key = ? LIMIT 1')
+        .get(key) as { id: number; slug: string } | undefined;
+
+      if (!seriesRow) {
+        const slug = ensureUniqueSlug(db, cleaned);
+        const titleEn = subLang === 'en' || !detectChineseScript(cleaned) ? cleaned : null;
+        const titleZh = subLang.startsWith('zh') || detectChineseScript(cleaned) ? cleaned : null;
+        const ins = db
+          .prepare('INSERT INTO series (slug, canonical_title, normalized_key, title_en, title_zh) VALUES (?, ?, ?, ?, ?)')
+          .run(slug, cleaned, key, titleEn, titleZh);
+        seriesRow = { id: Number(ins.lastInsertRowid), slug };
+      }
+
+      const virtualPlaylistId = `uploads:${key.slice(0, 64)}`;
+      const videoUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+      const thumb = d?.thumbnailUrl || thumbnailUrl || null;
+      const epNum = extractEpisodeNumber(finalTitle);
+      const pubMs = Date.parse(d?.publishedAt || publishedAtStr || '');
+      const pubSec = Number.isFinite(pubMs) ? Math.floor(pubMs / 1000) : null;
+
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        db.prepare(
+          `INSERT INTO channel_series (
+            channel_id, series_id, playlist_id, playlist_title, playlist_url,
+            thumbnail_url, sub_language, episode_count, access_note
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'free')
+          ON CONFLICT(channel_id, playlist_id) DO UPDATE SET
+            series_id = excluded.series_id,
+            thumbnail_url = COALESCE(excluded.thumbnail_url, channel_series.thumbnail_url)`
+        ).run(ch.id, seriesRow.id, virtualPlaylistId, cleaned, videoUrl, thumb, subLang);
+
+        const csRow = db
+          .prepare('SELECT id FROM channel_series WHERE channel_id = ? AND playlist_id = ?')
+          .get(ch.id, virtualPlaylistId) as { id: number };
+
+        db.prepare(
+          `INSERT INTO episodes (
+            channel_series_id, series_id, channel_id, youtube_video_id,
+            title, description, episode_number, playlist_position, sub_language,
+            duration_iso, thumbnail_url, published_at, view_count, like_count, comment_count,
+            tags, expires_at, region_allowed, region_blocked, details_synced_at, is_members_only
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), 0)
+          ON CONFLICT(channel_series_id, youtube_video_id) DO UPDATE SET
+            title = excluded.title,
+            duration_iso = COALESCE(excluded.duration_iso, episodes.duration_iso),
+            view_count = COALESCE(excluded.view_count, episodes.view_count),
+            like_count = COALESCE(excluded.like_count, episodes.like_count),
+            comment_count = COALESCE(excluded.comment_count, episodes.comment_count),
+            region_allowed = COALESCE(excluded.region_allowed, episodes.region_allowed),
+            region_blocked = COALESCE(excluded.region_blocked, episodes.region_blocked),
+            is_members_only = 0`
+        ).run(
+          csRow.id,
+          seriesRow.id,
+          ch.id,
+          videoId,
+          finalTitle,
+          (d?.description || '').slice(0, 2000) || null,
+          epNum,
+          subLang,
+          d?.durationIso ?? null,
+          thumb,
+          pubSec,
+          d?.viewCount ?? null,
+          d?.likeCount ?? null,
+          d?.commentCount ?? null,
+          JSON.stringify((d?.tags || []).slice(0, 15)),
+          extractExpiryDate(d?.description || ''),
+          d && d.regionAllowed.length > 0 ? JSON.stringify(d.regionAllowed) : null,
+          d && d.regionBlocked.length > 0 ? JSON.stringify(d.regionBlocked) : null
+        );
+
+        db.prepare(
+          'UPDATE channel_series SET episode_count = (SELECT COUNT(*) FROM episodes WHERE channel_series_id = ? AND is_members_only = 0) WHERE id = ?'
+        ).run(csRow.id, csRow.id);
+        db.exec('COMMIT;');
+      } catch (err) {
+        db.exec('ROLLBACK;');
+        throw err;
+      }
+
+      refreshSeriesStats(db, seriesRow.id);
+      return c.json({
+        ok: true,
+        channelId: ch.id,
+        channelName: ch.name,
+        seriesId: seriesRow.id,
+        seriesSlug: seriesRow.slug,
+        youtubeVideoId: videoId,
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : 'Failed importing video' }, 502);
     }
   });
 

@@ -771,6 +771,29 @@ test('Stealth /admin UI and /api/admin/* are hidden from public and allow author
     const importPlJson = (await importPlRes.json()) as any;
     assert.equal(importPlJson.importedEpisodes, 1);
 
+    const ytVideosRes = await app.request('/api/admin/youtube/search?mode=videos&q=Slime+Movie', {
+      headers: { cookie: cookieHeader },
+    });
+    assert.equal(ytVideosRes.status, 200);
+    const ytVideosJson = (await ytVideosRes.json()) as any;
+    assert.equal(ytVideosJson.mode, 'videos');
+    assert.equal(ytVideosJson.results[0].id, 'yt_song_99');
+
+    const importVidRes = await app.request('/api/admin/youtube/import-video', {
+      method: 'POST',
+      headers: { cookie: cookieHeader, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        videoId: 'yt_movie_88',
+        title: 'That Time I Got Reincarnated as a Slime: Tears of the Azure Sea [Eng Sub]',
+        channelId: 'UC_YT_SEARCH_1',
+        channelTitle: 'Official Studio YT',
+      }),
+    });
+    assert.equal(importVidRes.status, 200);
+    const importVidJson = (await importVidRes.json()) as any;
+    assert.equal(importVidJson.youtubeVideoId, 'yt_movie_88');
+    assert.ok(importVidJson.seriesSlug);
+
     const ytSongsRes = await app.request('/api/admin/youtube/search?mode=songs&q=Dandadan', {
       headers: { cookie: cookieHeader },
     });

@@ -132,17 +132,24 @@
 
     const box = document.createElement('div');
     box.className = 'admin-yt-box';
-    const label = mode === 'songs' ? 'YouTube Songs' : 'YouTube Playlists & Channels';
+    const label = mode === 'songs' ? 'YouTube Songs' : 'YouTube Playlists & Videos';
     const heading = hasLocalResults
       ? `Search ${label} for "${escapeHtml(cleanQ)}"`
       : `No local match for "${escapeHtml(cleanQ)}" — Search ${label}`;
+    const buttonsHtml =
+      mode === 'songs'
+        ? `<button type="button" class="btn-primary admin-yt-search-btn" data-yt-mode="songs">Search YouTube Songs (~100 quota)</button>`
+        : `<div class="admin-yt-actions" style="padding-top:0;margin-top:0;">
+            <button type="button" class="btn-primary admin-yt-search-btn" data-yt-mode="anime">Search Playlists (~100 quota)</button>
+            <button type="button" class="btn-secondary admin-yt-search-btn" data-yt-mode="videos">Search Videos (~100 quota)</button>
+          </div>`;
     box.innerHTML = `
       <div class="admin-yt-head">
         <div class="admin-yt-title">
           <span class="admin-yt-badge">Admin</span>
           <span>${heading}</span>
         </div>
-        <button type="button" class="btn-primary admin-yt-search-btn">Search YouTube (~100 quota)</button>
+        ${buttonsHtml}
       </div>
       <div class="admin-yt-status"></div>
       <div class="admin-yt-grid"></div>
@@ -153,7 +160,7 @@
       container.appendChild(box);
     }
 
-    const searchBtn = box.querySelector('.admin-yt-search-btn');
+    const searchBtns = [...box.querySelectorAll('.admin-yt-search-btn')];
     const statusNode = box.querySelector('.admin-yt-status');
     const gridNode = box.querySelector('.admin-yt-grid');
 
@@ -162,28 +169,29 @@
       statusNode.className = isErr ? 'admin-yt-status error' : 'admin-yt-status';
     };
 
-    searchBtn.addEventListener('click', async () => {
-      searchBtn.disabled = true;
-      setYtStatus(`Searching YouTube for "${cleanQ}"…`);
+    const runYtSearch = async (searchMode) => {
+      searchBtns.forEach((b) => { b.disabled = true; });
+      const kindLabel = searchMode === 'songs' ? 'songs' : searchMode === 'videos' ? 'videos' : 'playlists';
+      setYtStatus(`Searching YouTube ${kindLabel} for "${cleanQ}"…`);
       gridNode.innerHTML = '';
       try {
         const data = await adminApi(
-          `/api/admin/youtube/search?mode=${encodeURIComponent(mode)}&q=${encodeURIComponent(cleanQ)}`
+          `/api/admin/youtube/search?mode=${encodeURIComponent(searchMode)}&q=${encodeURIComponent(cleanQ)}`
         );
         const results = data.results || [];
         if (results.length === 0) {
-          setYtStatus(`No YouTube results found for "${cleanQ}".`);
+          setYtStatus(`No YouTube ${kindLabel} found for "${cleanQ}".`);
           return;
         }
-        setYtStatus(`Found ${results.length} YouTube result(s). Click Add or Sync to import into AnimaxTube.`);
+        setYtStatus(`Found ${results.length} YouTube ${kindLabel}. Click Import/Add or Sync to save into AnimaxTube.`);
 
         for (const r of results) {
           const card = document.createElement('div');
           card.className = 'admin-yt-card';
           const ytUrl =
-            mode === 'songs'
-              ? `https://www.youtube.com/watch?v=${encodeURIComponent(r.id)}`
-              : `https://www.youtube.com/playlist?list=${encodeURIComponent(r.id)}`;
+            searchMode === 'anime'
+              ? `https://www.youtube.com/playlist?list=${encodeURIComponent(r.id)}`
+              : `https://www.youtube.com/watch?v=${encodeURIComponent(r.id)}`;
           const safeThumb = safeUrl(r.thumbnailUrl);
           card.innerHTML = `
             ${safeThumb ? `<img class="admin-yt-thumb" src="${escapeHtml(safeThumb)}" alt="" loading="lazy" />` : ''}
@@ -195,7 +203,7 @@
           `;
           const actions = card.querySelector('.admin-yt-actions');
 
-          if (mode === 'songs') {
+          if (searchMode === 'songs') {
             const typeSel = document.createElement('select');
             typeSel.innerHTML = `
               <option value="op">OP</option>
@@ -256,6 +264,58 @@
               }
             };
             actions.appendChild(addChBtn);
+          } else if (searchMode === 'videos') {
+            const importVidBtn = document.createElement('button');
+            importVidBtn.type = 'button';
+            importVidBtn.className = 'btn-primary';
+            importVidBtn.textContent = r.videoInDb ? 'In DB (Re-import)' : 'Import Video';
+            importVidBtn.onclick = async () => {
+              importVidBtn.disabled = true;
+              importVidBtn.textContent = 'Importing…';
+              try {
+                const out = await adminApi('/api/admin/youtube/import-video', 'POST', {
+                  videoId: r.id,
+                  title: r.title,
+                  channelId: r.channelId,
+                  channelTitle: r.channelTitle,
+                  thumbnailUrl: r.thumbnailUrl,
+                  publishedAt: r.publishedAt,
+                });
+                importVidBtn.textContent = '✓ Imported';
+                setYtStatus(`Imported video "${r.title}" from ${out.channelName}! Refreshing…`);
+                await loadInitialMetadata();
+                await loadSeries(false);
+              } catch (err) {
+                importVidBtn.disabled = false;
+                importVidBtn.textContent = 'Import Video';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(importVidBtn);
+
+            const syncChBtn = document.createElement('button');
+            syncChBtn.type = 'button';
+            syncChBtn.className = 'btn-secondary';
+            syncChBtn.textContent = r.channelInDb ? 'Sync Channel' : 'Add & Sync Channel';
+            syncChBtn.onclick = async () => {
+              syncChBtn.disabled = true;
+              syncChBtn.textContent = 'Queuing…';
+              try {
+                await adminApi('/api/admin/channels', 'POST', {
+                  channel: r.channelId,
+                  force: true,
+                  syncPlaylists: true,
+                  syncVideos: true,
+                });
+                syncChBtn.textContent = '✓ Sync Queued';
+                setYtStatus(`Channel "${r.channelTitle}" added & background sync queued.`);
+              } catch (err) {
+                syncChBtn.disabled = false;
+                syncChBtn.textContent = r.channelInDb ? 'Sync Channel' : 'Add & Sync Channel';
+                setYtStatus(err.message, true);
+              }
+            };
+            actions.appendChild(syncChBtn);
           } else {
             const importPlBtn = document.createElement('button');
             importPlBtn.type = 'button';
@@ -314,8 +374,12 @@
       } catch (err) {
         setYtStatus(err.message, true);
       } finally {
-        searchBtn.disabled = false;
+        searchBtns.forEach((b) => { b.disabled = false; });
       }
+    };
+
+    searchBtns.forEach((btn) => {
+      btn.addEventListener('click', () => runYtSearch(btn.dataset.ytMode || mode));
     });
   }
 
